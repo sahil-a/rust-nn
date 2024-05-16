@@ -1,7 +1,9 @@
-use std::io::{self, Error};
+use csv::StringRecord;
+use std::error::Error;
+
 const INPUT_CSV_FILE: &str = "data/heart_statlog_cleveland_hungary_final.csv";
 
-fn main() -> std::io::Result<()> {
+fn main() -> Result<(), Box<dyn Error>> {
     println!("starting!");
 
     let mut csv_reader = csv::Reader::from_path(INPUT_CSV_FILE)?;
@@ -9,17 +11,11 @@ fn main() -> std::io::Result<()> {
 
     // iterate over the records and print them
     for result in csv_reader.records() {
-        match result {
-            Ok(record) => {
-                for (i, field) in record.iter().enumerate() {
-                    println!("{}: {}", column_names.get(i).unwrap(), field);
-                }
-                println!("")
-            }
-            Err(err) => {
-                return Err(Error::new(io::ErrorKind::Other, err.to_string()));
-            }
+        let record: StringRecord = result?;
+        for (i, field) in record.iter().enumerate() {
+            println!("{}: {}", column_names.get(i).unwrap(), field);
         }
+        println!("")
     }
 
     Ok(())
