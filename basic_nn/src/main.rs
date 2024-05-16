@@ -7,13 +7,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("starting!");
 
     let mut csv_reader = csv::Reader::from_path(INPUT_CSV_FILE)?;
-    let column_names = csv_reader.headers().unwrap().clone();
+    let column_names = csv_reader.headers()?.clone();
 
     // iterate over the records and print them
     for result in csv_reader.records() {
         let record: StringRecord = result?;
         for (i, field) in record.iter().enumerate() {
-            println!("{}: {}", column_names.get(i).unwrap(), field);
+            println!("{}: {}", column_names.get(i).unwrap_or(""), field);
         }
         println!("")
     }
