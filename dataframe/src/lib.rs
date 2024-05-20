@@ -8,6 +8,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 // TODO: restructure header writes
+// TODO: column names need to be comma separated
 
 #[derive(Debug)]
 pub struct DataFrame {
@@ -32,6 +33,8 @@ impl Drop for DataFrame {
 }
 
 // A DataFrame is always backed by a file (on transform or from_file, we create a new file)
+// A DataFrame is mmaped - if we iterate row by row, we'll never need to have the whole DF in
+// memory
 impl DataFrame {
     // TODO: load from .df file
 
