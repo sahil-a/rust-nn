@@ -22,6 +22,8 @@ pub struct DataFrame {
     permanent: bool,
 }
 
+const FILE_TYPE: &str = ".df";
+
 // Custom drop implementation to delete the file that backs the DF
 impl Drop for DataFrame {
     fn drop(&mut self) {
@@ -63,7 +65,7 @@ impl DataFrame {
         to_col_sizes: Vec<usize>,
         mut f: F,
     ) -> Result<DataFrame, Box<dyn Error>> {
-        let df_file_name = to_name.to_string() + ".df";
+        let df_file_name = format!("data/{}{}", to_name, FILE_TYPE);
         if Path::new(&df_file_name).exists() {
             remove_file(&df_file_name)?;
         }
@@ -157,7 +159,7 @@ impl DataFrame {
 
         // open a file to write to with the same name as "file" but with type .df instead of type
         // .csv
-        let df_file_name = file.replace(".csv", ".df");
+        let df_file_name = file.replace(".csv", FILE_TYPE);
         if Path::new(&df_file_name).exists() {
             remove_file(&df_file_name)?;
         }
