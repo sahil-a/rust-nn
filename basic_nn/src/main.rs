@@ -6,7 +6,8 @@ const INPUT_CSV_FILE: &str = "data/heart_statlog_cleveland_hungary_final.csv";
 fn main() -> Result<(), Box<dyn Error>> {
     println!("starting!");
 
-    let df = DataFrame::from_file(INPUT_CSV_FILE)?;
+    let mut df = DataFrame::from_file(INPUT_CSV_FILE)?;
+    df.mark_permanent();
     println!("{}", df.get(6, 3));
 
     // TODO: deal with categorical vs. numerical fields separately
