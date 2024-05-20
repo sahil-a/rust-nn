@@ -36,7 +36,7 @@ impl DataFrame {
     // TODO: load from .df file
 
     // make the file backing this DF permanent
-    pub fn mark_permanent(&mut self) {
+    pub fn write(&mut self) {
         self.permanent = true;
     }
 

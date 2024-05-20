@@ -7,7 +7,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("starting!");
 
     let mut df = DataFrame::from_file(INPUT_CSV_FILE)?;
-    df.mark_permanent();
+    df.write();
     println!("{}", df.get(6, 3));
 
     // TODO: deal with categorical vs. numerical fields separately
