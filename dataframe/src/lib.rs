@@ -1,9 +1,8 @@
-use half::{f16, vec};
+use half::f16;
 use memmap::{Mmap, MmapOptions};
 use std::error::Error;
 use std::fs::{remove_file, OpenOptions};
 use std::io::{BufWriter, Write};
-use std::ops::Index;
 use std::path::Path;
 use std::str::FromStr;
 
