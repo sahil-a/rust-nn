@@ -3,5 +3,5 @@
 
 resolver = "2"
 members = [
-    "basic_nn",
+    "basic_nn", "dataframe",
 ]
