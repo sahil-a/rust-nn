@@ -22,6 +22,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         prev
     })?;
     df.write();
+    df = df.expand_categorical("expanded_chest_pain_type", vec![2])?;
+    df.write();
 
     // TODO: deal with categorical vs. numerical fields separately
 
