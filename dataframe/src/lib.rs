@@ -45,11 +45,52 @@ impl DataFrame {
     }
 
     // TODO: assert that cols are size 1
-    // TODO: impl
-    pub fn expand_categorical(self, cols: Vec<usize>) -> Result<DataFrame, Box<dyn Error>> {
-        Ok(self)
+    pub fn expand_categorical(
+        &self,
+        to_name: &str,
+        cols: Vec<usize>,
+    ) -> Result<DataFrame, Box<dyn Error>> {
+        let mut to_col_sizes = self.col_sizes.clone();
+        for i in 0..self.rows {
+            for c in cols.iter().copied() {
+                let val = self.get(i, c).to_f32() as usize;
+                if val + 1 > to_col_sizes[c] {
+                    // zero indexed
+                    to_col_sizes[c] = val + 1;
+                }
+            }
+        }
+        let total_size: usize = to_col_sizes.iter().sum();
+        let expand = |vec: Vec<f16>| {
+            let mut expanded = vec![f16::ZERO; total_size];
+            let mut f: usize = 0;
+            let mut t: usize = 0;
+            for j in 0..self.cols {
+                let size = to_col_sizes[j];
+                if self.col_sizes[j] == size {
+                    for _ in 0..size {
+                        expanded[t] = vec[f];
+                        t += 1;
+                        f += 1;
+                    }
+                } else {
+                    // assuming previous size was 1
+                    let val = vec[f].to_f32() as usize;
+                    for k in 0..size {
+                        if k == val {
+                            expanded[t] = f16::ONE;
+                        }
+                        t += 1;
+                    }
+                    f += 1;
+                }
+            }
+            expanded
+        };
+        self.transform_with_sizes(to_name, to_col_sizes.clone(), expand)
     }
 
+    // KNOWN FAULT: f could expand/shrink Vec size without updating `col_sizes`
     pub fn transform<F: FnMut(Vec<f16>) -> Vec<f16>>(
         &self,
         to_name: &str,
