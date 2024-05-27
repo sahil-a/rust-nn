@@ -46,16 +46,36 @@ impl DataFrame {
     }
 
     pub fn log(&self, rows: usize) {
+        println!();
         for j in 0..self.cols {
-            println!("{}: {}", self.col_names[j], self.col_sizes[j]);
+            let len = self.col_names[j].len();
+            print!("{:<width$}", self.col_names[j], width = len + 4);
         }
+        println!();
         for i in 0..rows {
             let row = self.get_row(i);
-            for x in row.iter() {
-                print!("{} ", x);
+            let mut curr: usize = 0;
+            for j in 0..self.cols {
+                let mut start = self.col_size;
+                if j != self.cols - 1 {
+                    start = self.col_starts[j + 1];
+                }
+                let mut s: String = String::from("");
+                while curr != start {
+                    let x = row[curr];
+                    if x % f16::ONE == f16::ZERO {
+                        s.push_str(&format!("{} ", x));
+                    } else {
+                        s.push_str(&format!("{:.2} ", x));
+                    }
+                    curr += 1;
+                }
+                let len = self.col_names[j].len();
+                print!("{:<width$}", s, width = len + 4);
             }
             println!();
         }
+        println!();
     }
 
     pub fn normalize(&self, to_name: &str, cols: Vec<usize>) -> Result<DataFrame, Box<dyn Error>> {
