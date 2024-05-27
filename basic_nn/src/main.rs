@@ -7,25 +7,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("starting!");
 
     let mut df = DataFrame::from_file(INPUT_CSV_FILE)?;
+    df.log(5);
+    df = df.expand_categorical("expanded", vec![1, 2, 5, 6, 8, 10])?;
+    df.log(5);
+    df = df.normalize("expanded_and_normalized", vec![0, 3, 4, 7, 9])?;
+    df.log(5);
     df.write();
-    println!("{}", df.get(6, 3));
-    // TODO: figure out how to manipulate f16 & if it is worth it
-    df = df.transform("transformed", |prev| {
-        /*
-        // multiply each value by 2
-        let mut new = Vec::new();
-        for val in prev {
-            new.push(val * 2.0);
-        }
-        new
-        */
-        prev
-    })?;
-    df.write();
-    df = df.expand_categorical("expanded_chest_pain_type", vec![2])?;
-    df.write();
-
-    // TODO: deal with categorical vs. numerical fields separately
 
     println!("done!");
 

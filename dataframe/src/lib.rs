@@ -17,6 +17,7 @@ pub struct DataFrame {
     pub rows: usize,
     pub cols: usize,
     pub col_sizes: Vec<usize>,
+    pub col_starts: Vec<usize>,
     pub col_size: usize,
     pub col_names: Vec<String>,
     permanent: bool,
@@ -42,6 +43,52 @@ impl DataFrame {
     // make the file backing this DF permanent
     pub fn write(&mut self) {
         self.permanent = true;
+    }
+
+    pub fn log(&self, rows: usize) {
+        for j in 0..self.cols {
+            println!("{}: {}", self.col_names[j], self.col_sizes[j]);
+        }
+        for i in 0..rows {
+            let row = self.get_row(i);
+            for x in row.iter() {
+                print!("{} ", x);
+            }
+            println!();
+        }
+    }
+
+    pub fn normalize(&self, to_name: &str, cols: Vec<usize>) -> Result<DataFrame, Box<dyn Error>> {
+        let mut ave = vec![f16::ZERO; self.col_size];
+        let rows = f16::from_f64(self.rows as f64);
+        for i in 0..self.rows {
+            let vec = self.get_row(i);
+            for j in 0..self.col_size {
+                ave[j] += vec[j] / rows;
+            }
+        }
+        let mut stddev = vec![0.0; self.col_size]; // need more precision
+        let mut stddev_half = vec![f16::ZERO; self.col_size];
+        for i in 0..self.rows {
+            let vec = self.get_row(i);
+            for j in 0..self.col_size {
+                let x = vec[j] - ave[j];
+                stddev[j] += ((x * x) / rows).to_f64();
+            }
+        }
+        for j in 0..self.col_size {
+            stddev[j] = f64::sqrt(stddev[j]);
+            stddev_half[j] = f16::from_f64(stddev[j]);
+        }
+        let f = |vec: Vec<f16>| {
+            let mut normalized = vec.clone();
+            for j in cols.iter().copied() {
+                let start = self.col_starts[j];
+                normalized[start] = (normalized[start] - ave[start]) / stddev_half[start];
+            }
+            normalized
+        };
+        self.transform(to_name, f)
     }
 
     // TODO: assert that cols are size 1
@@ -154,12 +201,20 @@ impl DataFrame {
             .open(df_file_name.clone())?;
         let mmap = unsafe { MmapOptions::new().map(&read_fd)? };
 
+        let mut col_starts = vec![0; self.cols];
+        let mut prefix_sum = 0;
+        for j in 0..self.cols {
+            col_starts[j] = prefix_sum;
+            prefix_sum += to_col_sizes[j];
+        }
+
         Ok(DataFrame {
             file_name: df_file_name,
             mmap,
             rows: self.rows,
             cols: self.cols,
             col_sizes: to_col_sizes,
+            col_starts,
             col_names: self.col_names.clone(),
             data_start: bytes_written,
             col_size: to_col_size,
@@ -168,7 +223,7 @@ impl DataFrame {
     }
 
     pub fn get(&self, i: usize, j: usize) -> f16 {
-        let loc = self.data_start + ((i * self.cols + j) * 2);
+        let loc = self.data_start + ((i * self.col_size + j) * 2);
         let bytes = unsafe { *(self.mmap[loc..=loc + 1].as_ptr() as *const [u8; 2]) };
         f16::from_ne_bytes(bytes)
     }
@@ -176,7 +231,7 @@ impl DataFrame {
     // TODO: shouldn't need to iter if possible
     pub fn get_row(&self, i: usize) -> Vec<f16> {
         let mut res = vec![f16::ZERO; self.col_size];
-        let mut loc = self.data_start + ((i * self.cols) * 2);
+        let mut loc = self.data_start + ((i * self.col_size) * 2);
         for j in 0..self.col_size {
             let bytes = unsafe { *(self.mmap[loc..=loc + 1].as_ptr() as *const [u8; 2]) };
             res[j] = f16::from_ne_bytes(bytes);
@@ -253,12 +308,18 @@ impl DataFrame {
             .open(df_file_name.clone())?;
         let mmap = unsafe { MmapOptions::new().map(&read_fd)? };
 
+        let mut col_starts = vec![0; num_cols];
+        for j in 0..num_cols {
+            col_starts[j] = j;
+        }
+
         Ok(DataFrame {
             file_name: df_file_name,
             mmap,
             rows: num_rows,
             cols: num_cols,
             col_sizes: col_lens,
+            col_starts,
             col_names: column_names,
             col_size: num_cols,
             data_start: bytes_written,
