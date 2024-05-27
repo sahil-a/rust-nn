@@ -17,21 +17,26 @@ pub struct DataFrame {
     pub rows: usize,
     pub cols: usize,
     pub col_sizes: Vec<usize>,
-    pub col_starts: Vec<usize>,
-    pub col_size: usize,
+    pub col_starts: Vec<usize>, // prefix sum of `col_sizes`
+    pub col_size: usize,        // sum of `col_sizes`
     pub col_names: Vec<String>,
     permanent: bool,
 }
 
 const FILE_TYPE: &str = ".df";
 
-// Custom drop implementation to delete the file that backs the DF
+// Custom drop implementation to delete the file that backs the DF (unless permanent)
 impl Drop for DataFrame {
     fn drop(&mut self) {
         if !self.permanent && Path::new(&self.file_name).exists() {
             remove_file(&self.file_name).unwrap();
         }
     }
+}
+
+fn round(value: f16, places: i32) -> f16 {
+    let scale = (10.0 as f32).powi(places);
+    f16::from_f32((value.to_f32() * scale).round() / scale)
 }
 
 // A DataFrame is always backed by a file (on transform or from_file, we create a new file)
@@ -84,7 +89,7 @@ impl DataFrame {
         for i in 0..self.rows {
             let vec = self.get_row(i);
             for j in 0..self.col_size {
-                ave[j] += vec[j] / rows;
+                ave[j] += round(vec[j] / rows, 2);
             }
         }
         let mut stddev = vec![0.0; self.col_size]; // need more precision
@@ -92,8 +97,8 @@ impl DataFrame {
         for i in 0..self.rows {
             let vec = self.get_row(i);
             for j in 0..self.col_size {
-                let x = vec[j] - ave[j];
-                stddev[j] += ((x * x) / rows).to_f64();
+                let x = (vec[j] - ave[j]).to_f64();
+                stddev[j] += (x * x) / rows.to_f64();
             }
         }
         for j in 0..self.col_size {

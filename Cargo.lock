@@ -9,6 +9,7 @@ dependencies = [
  "csv",
  "dataframe",
  "half",
+ "model",
 ]
 
 [[package]]
@@ -90,6 +91,10 @@ dependencies = [
  "libc",
  "winapi",
 ]
+
+[[package]]
+name = "model"
+version = "0.1.0"
 
 [[package]]
 name = "proc-macro2"
