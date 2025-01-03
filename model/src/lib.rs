@@ -85,10 +85,21 @@ impl Display for ModelSchema {
 }
 
 impl Model {
-    pub fn new(schema: ModelSchema) -> Model {
+    pub fn build(schema: ModelSchema) -> Model {
         Model {
             layers: vec![Layer {}; schema.num_layers],
             schema,
         }
     }
 }
+
+// Potential Extension:
+//
+// Model and ModelSchema keeps whole model in memory
+// Upgrade this so that accesses to layers are abstracted behind a function
+// and only N sliding layers are in memory at once.
+//
+// Despite batching, this still might not be practical - too much disk I/O during training.
+// and inference because we need access to all layers
+//
+// This would allow you to have model sizes > memory.
