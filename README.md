@@ -1,6 +1,6 @@
-# Rust ML Experimentation
+# Rust ML Experimentation (WIP)
 
-I try to code a neural network ~~from scratch~~ with minimal dependencies. Also see https://github.com/sahil-a/metal-rs-matmul.
+I try to code a basic feedforward neural network ~~from scratch~~ with minimal dependencies. Also see https://github.com/sahil-a/metal-rs-matmul.
 
 ```
 ➜ ag "dependencies" -G Cargo.toml -A 10
