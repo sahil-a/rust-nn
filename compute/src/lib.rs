@@ -11,6 +11,7 @@ pub struct MetalContext {
     command_queue: CommandQueue,
     dot_product_pipeline: ComputePipelineState,
     matrix_multiply_pipeline: ComputePipelineState,
+    matrix_multiply_constant_pipeline: ComputePipelineState,
     relu_pipeline: ComputePipelineState,
 }
 
@@ -46,13 +47,94 @@ impl MetalContext {
                 .new_compute_pipeline_state_with_function(&relu_kernel)
                 .unwrap();
 
+            let matrix_multiply_constant_pipeline = device
+                .new_compute_pipeline_state_with_function(
+                    &library
+                        .get_function("matrix_multiply_constant", None)
+                        .unwrap(),
+                )
+                .unwrap();
+
             Self {
                 device,
                 command_queue,
                 dot_product_pipeline,
                 matrix_multiply_pipeline,
+                matrix_multiply_constant_pipeline,
                 relu_pipeline,
             }
+        })
+    }
+
+    /// Multiply a matrix by a constant scalar value.
+    /// Input matrix is row_len x col_len in row-major order.
+    /// Returns a new matrix of the same dimensions.
+    pub fn matrix_multiply_constant(
+        &self,
+        mat: &[f16],
+        constant: f16,
+        row_len: u32,
+        col_len: u32,
+    ) -> Vec<f16> {
+        let array_len = row_len * col_len;
+        assert_eq!(
+            mat.len() as u32,
+            array_len,
+            "Matrix dimensions don't match input length"
+        );
+
+        autoreleasepool(|| {
+            // 1. Create buffers
+            let input_buffer = create_buffer(&self.device, mat);
+            let constant_buffer = create_buffer(&self.device, &[constant]);
+            let output_buffer = create_buffer(
+                &self.device,
+                vec![f16::from_f32(0.0); array_len as usize].as_slice(),
+            );
+            let row_len_buffer = create_buffer(&self.device, &[row_len]);
+            let col_len_buffer = create_buffer(&self.device, &[col_len]);
+
+            // 2. Create command buffer & encoder
+            let command_buffer = self.command_queue.new_command_buffer();
+            let encoder = command_buffer.new_compute_command_encoder();
+
+            // 3. Set pipeline & buffers
+            encoder.set_compute_pipeline_state(&self.matrix_multiply_constant_pipeline);
+            encoder.set_buffer(0, Some(&input_buffer), 0);
+            encoder.set_buffer(1, Some(&constant_buffer), 0);
+            encoder.set_buffer(2, Some(&output_buffer), 0);
+            encoder.set_buffer(3, Some(&row_len_buffer), 0);
+            encoder.set_buffer(4, Some(&col_len_buffer), 0);
+
+            // 4. Determine thread layout (process 4 elements per thread in y dimension)
+            let threadgroup_size = MTLSize {
+                width: self
+                    .matrix_multiply_constant_pipeline
+                    .thread_execution_width(),
+                height: 1,
+                depth: 1,
+            };
+            let col_threads = (col_len as u64 as u64 + 3) / 4;
+            let threadgroup_count = MTLSize {
+                width: ((row_len as u64 + threadgroup_size.width - 1) / threadgroup_size.width)
+                    as u64,
+                height: ((col_threads + threadgroup_size.width - 1) / threadgroup_size.width)
+                    as u64,
+                depth: 1,
+            };
+
+            // 5. Encode & dispatch
+            encoder.dispatch_thread_groups(threadgroup_count, threadgroup_size);
+            encoder.end_encoding();
+
+            // 6. Commit & wait
+            command_buffer.commit();
+            command_buffer.wait_until_completed();
+
+            // 7. Read results
+            let ptr = output_buffer.contents() as *const f16;
+            let output_slice = unsafe { std::slice::from_raw_parts(ptr, array_len as usize) };
+            output_slice.to_vec()
         })
     }
 
@@ -361,8 +443,6 @@ mod tests {
         }
     }
 
-    // todo: get this to pass with false, and then true
-    // cpu result looks to be infinite
     #[test]
     fn matrix_multiply_transposed() {
         // 1) Create the shared Metal context
@@ -408,6 +488,39 @@ mod tests {
                 "GPU and CPU results differ significantly\nGPU result (incorrect): {:?}\nCPU result (correct): {:?}",
                 gpu_result,
                 cpu_result
+            );
+        }
+    }
+
+    #[test]
+    fn matrix_multiply_constant() {
+        let context = MetalContext::new("compute-kernel.metallib");
+
+        // Test matrix 3x3
+        let row_len = 3;
+        let col_len = 3;
+        let input: Vec<f16> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+            .into_iter()
+            .map(|x| f16::from_f32(x))
+            .collect();
+
+        let constant = f16::from_f32(2.0);
+
+        let result = context.matrix_multiply_constant(&input, constant, row_len, col_len);
+
+        // Expected results after multiplication by 2
+        let expected: Vec<f16> = vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0]
+            .into_iter()
+            .map(|x| f16::from_f32(x))
+            .collect();
+
+        assert_eq!(result.len(), expected.len());
+        for (got, want) in result.iter().zip(expected.iter()) {
+            assert!(
+                (got.to_f32() - want.to_f32()).abs() < 1e-3,
+                "Matrix multiply constant results differ: got {:?}, want {:?}",
+                got,
+                want
             );
         }
     }

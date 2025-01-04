@@ -12,11 +12,9 @@ using namespace metal;
 // 11 3 6 1 19 9 4 2 9 (stride = 4)
 // 30 3 6 1 19 9 4 2 9 (stride = 8)
 // 39 3 6 1 19 9 4 2 9 (stride = 16)
-- contiguous memory access would have been better
-// like adding the second half to the first half repeatedly
-kernel void sum_parallel(device half *data [[ buffer(0) ]], 
+kernel void sum_parallel(const device half *data [[ buffer(0) ]], 
                             volatile device atomic_uint *sum [[ buffer(1) ]],
-                            device uint *array_len [[ buffer(2) ]],
+                            const device uint *array_len [[ buffer(2) ]],
                             uint gid [[ thread_position_in_grid ]],
                             uint tid [[ threadgroup_position_in_grid ]],
                             uint lid [[ thread_position_in_threadgroup ]],
@@ -48,10 +46,10 @@ kernel void sum_parallel(device half *data [[ buffer(0) ]],
 }
 
 // same as above, with one line change for multiplication
-kernel void dot_product(device half *a [[ buffer(0) ]], 
-                            device half *b [[ buffer(1) ]],
+kernel void dot_product(const device half *a [[ buffer(0) ]], 
+                            const device half *b [[ buffer(1) ]],
                             volatile device atomic_uint *output [[ buffer(2) ]],
-                            device uint *array_len [[ buffer(3) ]],
+                            const device uint *array_len [[ buffer(3) ]],
                             uint gid [[ thread_position_in_grid ]],
                             uint tid [[ threadgroup_position_in_grid ]],
                             uint lid [[ thread_position_in_threadgroup ]],
@@ -82,9 +80,9 @@ kernel void dot_product(device half *a [[ buffer(0) ]],
     }
 }
 
-kernel void relu(device half *a [[ buffer(0) ]],
+kernel void relu(const device half *a [[ buffer(0) ]],
                 device half *output [[ buffer(1) ]],
-                device uint *array_len [[ buffer(2) ]],
+                const device uint *array_len [[ buffer(2) ]],
                 uint gid [[ thread_position_in_grid ]]) {
     uint base_idx = gid * 4;
     if (base_idx + 3 < *array_len) {
@@ -102,15 +100,39 @@ kernel void relu(device half *a [[ buffer(0) ]],
     }
 }
 
-kernel void matrix_multiply(device half *a [[ buffer(0) ]], 
-                            device half *b [[ buffer(1) ]],
+kernel void matrix_multiply_constant(const device half *a [[ buffer(0) ]],
+                            const device half *c [[ buffer(1) ]],
+                            device half *output [[buffer(2) ]],
+                            const device uint *row_len [[ buffer(3) ]],
+                            const device uint *col_len [[ buffer(4) ]],
+                            uint2 gid [[ thread_position_in_grid ]]) {
+    if (gid.x < *row_len) {
+        uint base_y = gid.y * 4;
+        if (base_y + 3 < *col_len) {
+            half4 input = half4(a[gid.x * *col_len + base_y], a[gid.x * *col_len + base_y + 1], a[gid.x * *col_len + base_y + 2], a[gid.x * *col_len + base_y + 3]);
+            half4 result = *c * input;
+            output[gid.x * *col_len + base_y] = result.x;
+            output[gid.x * *col_len + base_y + 1] = result.y;
+            output[gid.x * *col_len + base_y + 2] = result.z;
+            output[gid.x * *col_len + base_y + 3] = result.w;
+        } else {
+            for (uint i = 0; i < 4 && base_y + i < *col_len; i++) {
+                output[gid.x * *col_len + base_y + i] = a[gid.x * *col_len + base_y + i] * *c;
+            }
+        }
+    }
+}
+                    
+
+kernel void matrix_multiply(const device half *a [[ buffer(0) ]], 
+                            const device half *b [[ buffer(1) ]],
                             device half *output [[ buffer(2) ]],
-                            device uint *row_len [[ buffer(3) ]],
-                            device uint *inner_len [[ buffer(4) ]],
-                            device uint *col_len [[ buffer(5) ]],
-                            device bool *a_transposed [[ buffer(6) ]],
-                            device bool *b_transposed [[ buffer(7) ]],
-                            device uint *tile_size [[ buffer(8) ]],
+                            const device uint *row_len [[ buffer(3) ]],
+                            const device uint *inner_len [[ buffer(4) ]],
+                            const device uint *col_len [[ buffer(5) ]],
+                            const device bool *a_transposed [[ buffer(6) ]],
+                            const device bool *b_transposed [[ buffer(7) ]],
+                            const device uint *tile_size [[ buffer(8) ]],
                             uint2 tid [[ threadgroup_position_in_grid ]],
                             uint2 lid [[ thread_position_in_threadgroup ]],
                             uint2 threads_per_threadgroup [[ threads_per_threadgroup ]],
