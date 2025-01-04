@@ -11,6 +11,7 @@ pub struct MetalContext {
     command_queue: CommandQueue,
     dot_product_pipeline: ComputePipelineState,
     matrix_multiply_pipeline: ComputePipelineState,
+    relu_pipeline: ComputePipelineState,
 }
 
 impl MetalContext {
@@ -35,10 +36,14 @@ impl MetalContext {
                 .new_compute_pipeline_state_with_function(&dot_kernel)
                 .unwrap();
 
-            // 5. Create pipeline for matrix_multiply kernel
             let mat_kernel = library.get_function("matrix_multiply", None).unwrap();
             let matrix_multiply_pipeline = device
                 .new_compute_pipeline_state_with_function(&mat_kernel)
+                .unwrap();
+
+            let relu_kernel = library.get_function("relu", None).unwrap();
+            let relu_pipeline = device
+                .new_compute_pipeline_state_with_function(&relu_kernel)
                 .unwrap();
 
             Self {
@@ -46,6 +51,7 @@ impl MetalContext {
                 command_queue,
                 dot_product_pipeline,
                 matrix_multiply_pipeline,
+                relu_pipeline,
             }
         })
     }
@@ -109,10 +115,61 @@ impl MetalContext {
         })
     }
 
+    /// Returns a `row_len * col_len` vector of `f16`.
+    /// Apply ReLU activation function to a vector of half-precision floats.
+    /// Returns a new vector with ReLU applied (max(0, x) for each element).
+    pub fn relu(&self, input: &[f16]) -> Vec<f16> {
+        let array_len = input.len() as u32;
+
+        autoreleasepool(|| {
+            // 1. Create buffers
+            let input_buffer = create_buffer(&self.device, input);
+            let output_buffer = create_buffer(
+                &self.device,
+                vec![f16::from_f32(0.0); array_len as usize].as_slice(),
+            );
+            let array_len_buffer = create_buffer(&self.device, &[array_len]);
+
+            // 2. Create command buffer & encoder
+            let command_buffer = self.command_queue.new_command_buffer();
+            let encoder = command_buffer.new_compute_command_encoder();
+
+            // 3. Set pipeline & buffers
+            encoder.set_compute_pipeline_state(&self.relu_pipeline);
+            encoder.set_buffer(0, Some(&input_buffer), 0);
+            encoder.set_buffer(1, Some(&output_buffer), 0);
+            encoder.set_buffer(2, Some(&array_len_buffer), 0);
+
+            // 4. Determine thread layout (process 4 elements per thread)
+            let num_threads = ((array_len + 3) / 4) as u64;
+            let threadgroup_size = MTLSize {
+                width: self.relu_pipeline.thread_execution_width(),
+                height: 1,
+                depth: 1,
+            };
+            let threadgroup_count = MTLSize {
+                width: (num_threads + threadgroup_size.width - 1) / threadgroup_size.width,
+                height: 1,
+                depth: 1,
+            };
+
+            // 5. Encode & dispatch
+            encoder.dispatch_thread_groups(threadgroup_count, threadgroup_size);
+            encoder.end_encoding();
+
+            // 6. Commit & wait
+            command_buffer.commit();
+            command_buffer.wait_until_completed();
+
+            // 7. Read results
+            let ptr = output_buffer.contents() as *const f16;
+            let output_slice = unsafe { std::slice::from_raw_parts(ptr, array_len as usize) };
+            output_slice.to_vec()
+        })
+    }
+
     /// Multiply two matrices (A of size row_len x inner_len, and B of size inner_len x col_len)
     /// stored in row-major order. Both inputs are `Vec<f16>`; output is `Vec<f16>`
-    ///
-    /// Returns a `row_len * col_len` vector of `f16`.
     pub fn matrix_multiply(
         &self,
         a: &[f16],
@@ -351,6 +408,35 @@ mod tests {
                 "GPU and CPU results differ significantly\nGPU result (incorrect): {:?}\nCPU result (correct): {:?}",
                 gpu_result,
                 cpu_result
+            );
+        }
+    }
+
+    #[test]
+    fn relu() {
+        let context = MetalContext::new("compute-kernel.metallib");
+
+        // Test data with positive and negative values
+        let input: Vec<f16> = vec![-2.0, -1.0, 0.0, 1.0, 2.0]
+            .into_iter()
+            .map(|x| f16::from_f32(x))
+            .collect();
+
+        let result = context.relu(&input);
+
+        // Expected results after ReLU
+        let expected: Vec<f16> = vec![0.0, 0.0, 0.0, 1.0, 2.0]
+            .into_iter()
+            .map(|x| f16::from_f32(x))
+            .collect();
+
+        assert_eq!(result.len(), expected.len());
+        for (got, want) in result.iter().zip(expected.iter()) {
+            assert!(
+                (got.to_f32() - want.to_f32()).abs() < 1e-3,
+                "ReLU results differ: got {:?}, want {:?}",
+                got,
+                want
             );
         }
     }

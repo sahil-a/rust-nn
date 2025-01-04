@@ -12,7 +12,7 @@ using namespace metal;
 // 11 3 6 1 19 9 4 2 9 (stride = 4)
 // 30 3 6 1 19 9 4 2 9 (stride = 8)
 // 39 3 6 1 19 9 4 2 9 (stride = 16)
-// note - contiguous memory access would have been better
+- contiguous memory access would have been better
 // like adding the second half to the first half repeatedly
 kernel void sum_parallel(device half *data [[ buffer(0) ]], 
                             volatile device atomic_uint *sum [[ buffer(1) ]],
@@ -79,6 +79,26 @@ kernel void dot_product(device half *a [[ buffer(0) ]],
     // add the final result to the output
     if (lid == 0) {
         atomic_fetch_add_explicit(output, (uint)shared_mem[0], memory_order_relaxed);
+    }
+}
+
+kernel void relu(device half *a [[ buffer(0) ]],
+                device half *output [[ buffer(1) ]],
+                device uint *array_len [[ buffer(2) ]],
+                uint gid [[ thread_position_in_grid ]]) {
+    uint base_idx = gid * 4;
+    if (base_idx + 3 < *array_len) {
+        // All 4 elements are within bounds - use vectorized operation
+        half4 input = half4(a[base_idx], a[base_idx + 1], a[base_idx + 2], a[base_idx + 3]);
+        half4 result = max(input, 0.0h);
+        output[base_idx] = result.x;
+        output[base_idx + 1] = result.y;
+        output[base_idx + 2] = result.z;
+        output[base_idx + 3] = result.w;
+    } else {
+        for (uint i = 0; i < 4 && base_idx + i < *array_len; i++) {
+            output[base_idx + i] = max(a[base_idx + i], 0.0h);
+        }
     }
 }
 
