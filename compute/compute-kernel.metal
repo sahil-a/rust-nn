@@ -102,7 +102,6 @@ kernel void relu(device half *a [[ buffer(0) ]],
     }
 }
 
-
 kernel void matrix_multiply(device half *a [[ buffer(0) ]], 
                             device half *b [[ buffer(1) ]],
                             device half *output [[ buffer(2) ]],
