@@ -12,6 +12,7 @@ pub struct MetalContext {
     dot_product_pipeline: ComputePipelineState,
     matrix_multiply_pipeline: ComputePipelineState,
     matrix_multiply_constant_pipeline: ComputePipelineState,
+    matrix_multiply_rowwise_pipeline: ComputePipelineState,
     matrix_addition_pipeline: ComputePipelineState,
     relu_pipeline: ComputePipelineState,
     vector_multiply_pipeline: ComputePipelineState,
@@ -68,6 +69,14 @@ impl MetalContext {
                 )
                 .unwrap();
 
+            let matrix_multiply_rowwise_pipeline = device
+                .new_compute_pipeline_state_with_function(
+                    &library
+                        .get_function("matrix_multiply_rowwise", None)
+                        .unwrap(),
+                )
+                .unwrap();
+
             let matrix_addition_pipeline = device
                 .new_compute_pipeline_state_with_function(
                     &library.get_function("matrix_addition", None).unwrap(),
@@ -98,6 +107,7 @@ impl MetalContext {
                 dot_product_pipeline,
                 matrix_multiply_pipeline,
                 matrix_multiply_constant_pipeline,
+                matrix_multiply_rowwise_pipeline,
                 matrix_addition_pipeline,
                 relu_pipeline,
                 vector_multiply_pipeline,
@@ -162,6 +172,87 @@ impl MetalContext {
             // 4. Determine thread layout (process 4 elements per thread in y dimension)
             let threadgroup_size = MTLSize {
                 width: self.matrix_addition_pipeline.thread_execution_width(),
+                height: 1,
+                depth: 1,
+            };
+            let col_threads = (col_len as u64 + 3) / 4;
+            let threadgroup_count = MTLSize {
+                width: ((row_len as u64 + threadgroup_size.width - 1) / threadgroup_size.width)
+                    as u64,
+                height: ((col_threads + threadgroup_size.width - 1) / threadgroup_size.width)
+                    as u64,
+                depth: 1,
+            };
+
+            // 5. Encode & dispatch
+            encoder.dispatch_thread_groups(threadgroup_count, threadgroup_size);
+            encoder.end_encoding();
+
+            // 6. Commit & wait
+            command_buffer.commit();
+            command_buffer.wait_until_completed();
+
+            // 7. Read results
+            let ptr = output_buffer.contents() as *const f16;
+            let output_slice = unsafe { std::slice::from_raw_parts(ptr, array_len as usize) };
+            output_slice.to_vec()
+        })
+    }
+
+    /// Multiply each row of a matrix by the corresponding scalar in a vector.
+    /// Input matrix is row_len x col_len in row-major order.
+    /// Vector length must match row_len.
+    /// Returns a new matrix of the same dimensions.
+    pub fn matrix_multiply_rowwise(
+        &self,
+        mat: &[f16],
+        vec: &[f16],
+        row_len: u32,
+        col_len: u32,
+        mat_transposed: bool,
+    ) -> Vec<f16> {
+        let array_len = row_len * col_len;
+        assert_eq!(
+            mat.len() as u32,
+            array_len,
+            "Matrix dimensions don't match input length"
+        );
+        assert_eq!(
+            vec.len() as u32,
+            row_len,
+            "Vector length must match number of rows"
+        );
+
+        autoreleasepool(|| {
+            // 1. Create buffers
+            let input_buffer = create_buffer(&self.device, mat);
+            let vector_buffer = create_buffer(&self.device, vec);
+            let transposed_buffer = create_buffer(&self.device, &[mat_transposed]);
+            let output_buffer = create_buffer(
+                &self.device,
+                vec![f16::from_f32(0.0); array_len as usize].as_slice(),
+            );
+            let row_len_buffer = create_buffer(&self.device, &[row_len]);
+            let col_len_buffer = create_buffer(&self.device, &[col_len]);
+
+            // 2. Create command buffer & encoder
+            let command_buffer = self.command_queue.new_command_buffer();
+            let encoder = command_buffer.new_compute_command_encoder();
+
+            // 3. Set pipeline & buffers
+            encoder.set_compute_pipeline_state(&self.matrix_multiply_rowwise_pipeline);
+            encoder.set_buffer(0, Some(&input_buffer), 0);
+            encoder.set_buffer(1, Some(&vector_buffer), 0);
+            encoder.set_buffer(2, Some(&transposed_buffer), 0);
+            encoder.set_buffer(3, Some(&output_buffer), 0);
+            encoder.set_buffer(4, Some(&row_len_buffer), 0);
+            encoder.set_buffer(5, Some(&col_len_buffer), 0);
+
+            // 4. Determine thread layout (process 4 elements per thread in y dimension)
+            let threadgroup_size = MTLSize {
+                width: self
+                    .matrix_multiply_rowwise_pipeline
+                    .thread_execution_width(),
                 height: 1,
                 depth: 1,
             };
@@ -835,6 +926,82 @@ mod tests {
             assert!(
                 (got.to_f32() - want.to_f32()).abs() < 1e-3,
                 "Matrix addition results differ: got {:?}, want {:?}",
+                got,
+                want
+            );
+        }
+    }
+
+    #[test]
+    fn matrix_multiply_rowwise() {
+        let context = MetalContext::new("compute-kernel.metallib");
+
+        // Test matrix 3x4
+        let row_len = 3;
+        let col_len = 4;
+        let input: Vec<f16> = vec![
+            1.0, 2.0, 3.0, 4.0, // row 1
+            5.0, 6.0, 7.0, 8.0, // row 2
+            9.0, 10.0, 11.0, 12.0, // row 3
+        ]
+        .into_iter()
+        .map(|x| f16::from_f32(x))
+        .collect();
+
+        let row_multipliers: Vec<f16> = vec![2.0, 3.0, 4.0] // one per row
+            .into_iter()
+            .map(|x| f16::from_f32(x))
+            .collect();
+
+        // Test non-transposed case
+        let result =
+            context.matrix_multiply_rowwise(&input, &row_multipliers, row_len, col_len, false);
+
+        // Expected results: each row multiplied by its corresponding multiplier
+        let expected: Vec<f16> = vec![
+            2.0, 4.0, 6.0, 8.0, // row 1 * 2
+            15.0, 18.0, 21.0, 24.0, // row 2 * 3
+            36.0, 40.0, 44.0, 48.0, // row 3 * 4
+        ]
+        .into_iter()
+        .map(|x| f16::from_f32(x))
+        .collect();
+
+        assert_eq!(result.len(), expected.len());
+        for (got, want) in result.iter().zip(expected.iter()) {
+            assert!(
+                (got.to_f32() - want.to_f32()).abs() < 1e-3,
+                "Matrix multiply rowwise results differ: got {:?}, want {:?}",
+                got,
+                want
+            );
+        }
+
+        // Test transposed case
+        let input_transposed: Vec<f16> = vec![
+            1.0, 5.0, 9.0, // col 1
+            2.0, 6.0, 10.0, // col 2
+            3.0, 7.0, 11.0, // col 3
+            4.0, 8.0, 12.0, // col 4
+        ]
+        .into_iter()
+        .map(|x| f16::from_f32(x))
+        .collect();
+
+        let result_transposed = context.matrix_multiply_rowwise(
+            &input_transposed,
+            &row_multipliers,
+            row_len,
+            col_len,
+            true,
+        );
+
+        // Results should be the same as non-transposed case
+        assert_eq!(result_transposed.len(), expected.len());
+        for (got, want) in result_transposed.iter().zip(expected.iter()) {
+            assert!(
+                (got.to_f32() - want.to_f32()).abs() < 1e-3,
+                "Matrix multiply rowwise (transposed) results differ: got {:?}, want {:?}",
                 got,
                 want
             );

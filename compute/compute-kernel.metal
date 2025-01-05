@@ -242,6 +242,39 @@ kernel void matrix_addition(const device half *a [[ buffer(0) ]],
     }
 }
 
+kernel void matrix_multiply_rowwise(const device half *a [[ buffer(0) ]],
+                            const device half *b [[ buffer(1) ]],
+                            const device bool *a_transposed [[ buffer(2) ]],
+                            device half *output [[buffer(3) ]],
+                            const device uint *row_len [[ buffer(4) ]],
+                            const device uint *col_len [[ buffer(5) ]],
+                            uint2 gid [[ thread_position_in_grid ]]) {
+    if (*a_transposed) {
+        if (gid.y < *row_len) {
+            uint base_y = gid.y * 4;
+            for (uint i = 0; i < 4 && base_y + i < *col_len; i++) {
+                output[gid.x * *col_len + base_y + i] = a[(base_y + i) * *row_len + gid.x] * b[gid.x];
+            }
+        }
+    } else {
+        if (gid.x < *row_len) {
+            uint base_y = gid.y * 4;
+            if (base_y + 3 < *col_len) {
+                half4 input = half4(a[gid.x * *col_len + base_y], a[gid.x * *col_len + base_y + 1], a[gid.x * *col_len + base_y + 2], a[gid.x * *col_len + base_y + 3]);
+                half4 result = b[gid.x] * input;
+                output[gid.x * *col_len + base_y] = result.x;
+                output[gid.x * *col_len + base_y + 1] = result.y;
+                output[gid.x * *col_len + base_y + 2] = result.z;
+                output[gid.x * *col_len + base_y + 3] = result.w;
+            } else {
+                for (uint i = 0; i < 4 && base_y + i < *col_len; i++) {
+                    output[gid.x * *col_len + base_y + i] = a[gid.x * *col_len + base_y + i] * b[gid.x];
+                }
+            }
+        }
+    }
+}
+
 kernel void matrix_multiply_constant(const device half *a [[ buffer(0) ]],
                             const device half *c [[ buffer(1) ]],
                             device half *output [[buffer(2) ]],
