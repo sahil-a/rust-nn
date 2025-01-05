@@ -100,6 +100,76 @@ kernel void relu(const device half *a [[ buffer(0) ]],
     }
 }
 
+half exp_approx(half x) {
+    return pow(M_E_H, x);
+}
+
+half4 exp_approx(half4 x) {
+    return pow(half4(M_E_H), x);
+}
+
+kernel void softmax_sum(const device half *a [[ buffer(0) ]],
+                    volatile device atomic_float *sum [[ buffer(1) ]],
+                    const device uint *array_len [[ buffer(2) ]],
+                    uint gid [[ thread_position_in_grid ]],
+                    uint tid [[ threadgroup_position_in_grid ]],
+                    uint lid [[ thread_position_in_threadgroup ]],
+                    uint threads_per_threadgroup [[ threads_per_threadgroup ]],
+                    threadgroup float *shared_mem [[ threadgroup(0) ]]) {
+    uint base_idx = gid * 4;
+    if (base_idx + 3 < *array_len) {
+        half4 input = half4(a[base_idx], a[base_idx + 1], a[base_idx + 2], a[base_idx + 3]);
+        float4 result = float4(exp_approx(input));
+        shared_mem[lid] = result.x + result.y + result.z + result.w;
+    } else {
+        half sum = 0;
+        for (uint i = 0; i < 4 && base_idx + i < *array_len; i++) {
+            sum += exp_approx(a[base_idx + i]);
+        }
+        shared_mem[lid] = float(sum);
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = 2; stride/2 < threads_per_threadgroup; stride <<= 1) {
+        if (lid % stride == 0 && (lid + stride/2 < threads_per_threadgroup)) {
+            shared_mem[lid] += shared_mem[lid + stride/2];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (lid == 0) {
+        atomic_fetch_add_explicit(sum, shared_mem[0], memory_order_relaxed);
+    }
+}
+
+kernel void softmax_output(const device half *a [[ buffer(0) ]],
+                    const device float *sum [[ buffer(1) ]],
+                    const device uint *array_len [[ buffer(2) ]],
+                    device half *output [[ buffer(3) ]],
+                    uint gid [[ thread_position_in_grid ]],
+                    uint tid [[ threadgroup_position_in_grid ]],
+                    uint lid [[ thread_position_in_threadgroup ]],
+                    uint threads_per_threadgroup [[ threads_per_threadgroup ]],
+                    threadgroup half *shared_mem [[ threadgroup(0) ]]) {
+    half denominator = half(*sum);
+    uint base_idx = gid * 4;
+
+    if (base_idx + 3 < *array_len) {
+        // All 4 elements are within bounds - use vectorized operation
+        half4 input = half4(a[base_idx], a[base_idx + 1], a[base_idx + 2], a[base_idx + 3]);
+        half4 result = exp_approx(input) / denominator;
+        output[base_idx] = result.x;
+        output[base_idx + 1] = result.y;
+        output[base_idx + 2] = result.z;
+        output[base_idx + 3] = result.w;
+    } else {
+        for (uint i = 0; i < 4 && base_idx + i < *array_len; i++) {
+            output[base_idx + i] = exp_approx(a[base_idx + i]) / denominator;
+        }
+    }
+}
+
 kernel void matrix_multiply_constant(const device half *a [[ buffer(0) ]],
                             const device half *c [[ buffer(1) ]],
                             device half *output [[buffer(2) ]],
@@ -144,7 +214,6 @@ kernel void matrix_multiply(const device half *a [[ buffer(0) ]],
     half sum = 0;
     uint x = tid.x * *tile_size + lid.x;
     uint y = tid.y * *tile_size + lid.y;
-    [[unroll(16)]]
     for (uint inner_start = 0; inner_start < *inner_len; inner_start += *tile_size) {
         // 1. Load all rows of A and cols of B for this tile
         if (x < *row_len) { // load row x (uniform condition)
@@ -174,7 +243,6 @@ kernel void matrix_multiply(const device half *a [[ buffer(0) ]],
        if (x < *row_len && y < *col_len) {
             half4 sum4 = half4(0.0h);
             uint i;
-            [[unroll(4)]]
             for (i = 0; i + 3 < *tile_size && inner_start + i + 3 < *inner_len; i += 4) {
                 half4 a4(shared_mem_a[*tile_size * lid.x + i],
                         shared_mem_a[*tile_size * lid.x + i + 1],

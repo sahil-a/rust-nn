@@ -13,6 +13,8 @@ pub struct MetalContext {
     matrix_multiply_pipeline: ComputePipelineState,
     matrix_multiply_constant_pipeline: ComputePipelineState,
     relu_pipeline: ComputePipelineState,
+    softmax_sum_pipeline: ComputePipelineState,
+    softmax_output_pipeline: ComputePipelineState,
 }
 
 impl MetalContext {
@@ -55,6 +57,18 @@ impl MetalContext {
                 )
                 .unwrap();
 
+            let softmax_sum_pipeline = device
+                .new_compute_pipeline_state_with_function(
+                    &library.get_function("softmax_sum", None).unwrap(),
+                )
+                .unwrap();
+
+            let softmax_output_pipeline = device
+                .new_compute_pipeline_state_with_function(
+                    &library.get_function("softmax_output", None).unwrap(),
+                )
+                .unwrap();
+
             Self {
                 device,
                 command_queue,
@@ -62,6 +76,8 @@ impl MetalContext {
                 matrix_multiply_pipeline,
                 matrix_multiply_constant_pipeline,
                 relu_pipeline,
+                softmax_sum_pipeline,
+                softmax_output_pipeline,
             }
         })
     }
@@ -198,7 +214,80 @@ impl MetalContext {
     }
 
     /// Returns a `row_len * col_len` vector of `f16`.
-    /// Apply ReLU activation function to a vector of half-precision floats.
+    /// Compute softmax function on input vector: exp(x_i)/sum(exp(x_j))
+    /// Returns a new vector with softmax applied.
+    pub fn softmax(&self, input: &[f16]) -> Vec<f16> {
+        let array_len = input.len() as u32;
+
+        autoreleasepool(|| {
+            // 1. Create buffers
+            let input_buffer = create_buffer(&self.device, input);
+            let sum_buffer = create_buffer(&self.device, &[0.0f32]);
+            let array_len_buffer = create_buffer(&self.device, &[array_len]);
+            let output_buffer = create_buffer(
+                // todo: this should be the number of thread groups
+                &self.device,
+                vec![f16::from_f32(0.0); array_len as usize].as_slice(),
+            );
+
+            // 2. Create command buffer & encoder for sum computation
+            let command_buffer = self.command_queue.new_command_buffer();
+            let encoder = command_buffer.new_compute_command_encoder();
+
+            // 3. Set pipeline & buffers for sum
+            encoder.set_compute_pipeline_state(&self.softmax_sum_pipeline);
+            encoder.set_buffer(0, Some(&input_buffer), 0);
+            encoder.set_buffer(1, Some(&sum_buffer), 0);
+            encoder.set_buffer(2, Some(&array_len_buffer), 0);
+
+            // 4. Determine thread layout for sum (process 4 elements per thread)
+            let num_threads = ((array_len + 3) / 4) as u64;
+            let threadgroup_size = MTLSize {
+                width: self.softmax_sum_pipeline.thread_execution_width(),
+                height: 1,
+                depth: 1,
+            };
+            let threadgroup_count = MTLSize {
+                width: (num_threads + threadgroup_size.width - 1) / threadgroup_size.width,
+                height: 1,
+                depth: 1,
+            };
+
+            // 5. Allocate threadgroup memory for reduction
+            encoder.set_threadgroup_memory_length(
+                0,
+                threadgroup_size.width * (mem::size_of::<f32>() as u64),
+            );
+
+            // 6. Encode & dispatch sum computation
+            encoder.dispatch_thread_groups(threadgroup_count, threadgroup_size);
+            encoder.end_encoding();
+
+            // Start a new encoder for the output computation
+            let encoder = command_buffer.new_compute_command_encoder();
+
+            // Set pipeline & buffers for output
+            encoder.set_compute_pipeline_state(&self.softmax_output_pipeline);
+            encoder.set_buffer(0, Some(&input_buffer), 0);
+            encoder.set_buffer(1, Some(&sum_buffer), 0);
+            encoder.set_buffer(2, Some(&array_len_buffer), 0);
+            encoder.set_buffer(3, Some(&output_buffer), 0);
+
+            // Use same thread layout for output computation
+            encoder.dispatch_thread_groups(threadgroup_count, threadgroup_size);
+            encoder.end_encoding();
+
+            // 7. Commit & wait
+            command_buffer.commit();
+            command_buffer.wait_until_completed();
+
+            // 8. Read results
+            let ptr = output_buffer.contents() as *const f16;
+            let output_slice = unsafe { std::slice::from_raw_parts(ptr, array_len as usize) };
+            output_slice.to_vec()
+        })
+    }
+
     /// Returns a new vector with ReLU applied (max(0, x) for each element).
     pub fn relu(&self, input: &[f16]) -> Vec<f16> {
         let array_len = input.len() as u32;
@@ -523,6 +612,48 @@ mod tests {
                 want
             );
         }
+    }
+
+    /// CPU implementation of softmax for testing
+    fn cpu_softmax(input: &[f16]) -> Vec<f16> {
+        // First pass: compute exp and sum
+        let exp_values: Vec<f32> = input.iter().map(|x| x.to_f32().exp()).collect();
+        let sum: f32 = exp_values.iter().sum();
+
+        // Second pass: divide by sum
+        exp_values.iter().map(|x| f16::from_f32(x / sum)).collect()
+    }
+
+    #[test]
+    fn softmax() {
+        let context = MetalContext::new("compute-kernel.metallib");
+
+        // Test data with a mix of positive and negative values
+        let input: Vec<f16> = vec![-2.0, -1.0, 0.0, 1.0, 2.0]
+            .into_iter()
+            .map(|x| f16::from_f32(x))
+            .collect();
+
+        let result = context.softmax(&input);
+        let expected = cpu_softmax(&input);
+
+        assert_eq!(result.len(), expected.len());
+        for (got, want) in result.iter().zip(expected.iter()) {
+            assert!(
+                (got.to_f32() - want.to_f32()).abs() < 1e-3,
+                "Softmax results differ significantly: got {:?}, want {:?}",
+                got,
+                want
+            );
+        }
+
+        // Verify the sum of probabilities is approximately 1
+        let sum: f32 = result.iter().map(|x| x.to_f32()).sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-3,
+            "Sum of softmax probabilities should be 1, got {}",
+            sum
+        );
     }
 
     #[test]
