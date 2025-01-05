@@ -100,6 +100,52 @@ kernel void relu(const device half *a [[ buffer(0) ]],
     }
 }
 
+kernel void vector_pairwise_multiply(
+                const device half *a [[ buffer(0) ]],
+                const device half *b [[ buffer(1) ]],
+                device half *output [[ buffer(2) ]],
+                const device uint *array_len [[ buffer(3) ]],
+                uint gid [[ thread_position_in_grid ]]) {
+    uint base_idx = gid * 4;
+    if (base_idx + 3 < *array_len) {
+        // All 4 elements are within bounds - use vectorized operation
+        half4 input_a = half4(a[base_idx], a[base_idx + 1], a[base_idx + 2], a[base_idx + 3]);
+        half4 input_b = half4(b[base_idx], b[base_idx + 1], b[base_idx + 2], b[base_idx + 3]);
+        half4 result = input_a * input_b;
+        output[base_idx] = result.x;
+        output[base_idx + 1] = result.y;
+        output[base_idx + 2] = result.z;
+        output[base_idx + 3] = result.w;
+    } else {
+        for (uint i = 0; i < 4 && base_idx + i < *array_len; i++) {
+            output[base_idx + i] = a[base_idx + i] * b[base_idx + i];
+        }
+    }
+}
+
+kernel void positive_indicator(
+    const device half *a [[ buffer(0) ]],
+    device half *output [[ buffer(1) ]],
+    const device uint *array_len [[ buffer(2) ]],
+    uint gid [[ thread_position_in_grid ]]
+) {
+    uint base_idx = gid * 4;
+    if (base_idx + 3 < *array_len) {
+        // Vectorized operation with correct mask conversion
+        half4 input = half4(a[base_idx], a[base_idx + 1], a[base_idx + 2], a[base_idx + 3]);
+        half4 result = select(half4(0.0h), half4(1.0h), input > 0.0h);
+        output[base_idx] = result.x;
+        output[base_idx + 1] = result.y;
+        output[base_idx + 2] = result.z;
+        output[base_idx + 3] = result.w;
+    } else {
+        // Scalar operation remains unchanged
+        for (uint i = 0; i < 4 && base_idx + i < *array_len; i++) {
+            output[base_idx + i] = half(a[base_idx + i] > 0.0h) ? 1.0h : 0.0h;
+        }
+    }
+}
+
 half exp_approx(half x) {
     return pow(M_E_H, x);
 }

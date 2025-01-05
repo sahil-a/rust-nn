@@ -13,8 +13,10 @@ pub struct MetalContext {
     matrix_multiply_pipeline: ComputePipelineState,
     matrix_multiply_constant_pipeline: ComputePipelineState,
     relu_pipeline: ComputePipelineState,
+    vector_multiply_pipeline: ComputePipelineState,
     softmax_sum_pipeline: ComputePipelineState,
     softmax_output_pipeline: ComputePipelineState,
+    positive_indicator_pipeline: ComputePipelineState,
 }
 
 impl MetalContext {
@@ -49,6 +51,14 @@ impl MetalContext {
                 .new_compute_pipeline_state_with_function(&relu_kernel)
                 .unwrap();
 
+            let vector_multiply_pipeline = device
+                .new_compute_pipeline_state_with_function(
+                    &library
+                        .get_function("vector_pairwise_multiply", None)
+                        .unwrap(),
+                )
+                .unwrap();
+
             let matrix_multiply_constant_pipeline = device
                 .new_compute_pipeline_state_with_function(
                     &library
@@ -69,6 +79,12 @@ impl MetalContext {
                 )
                 .unwrap();
 
+            let positive_indicator_pipeline = device
+                .new_compute_pipeline_state_with_function(
+                    &library.get_function("positive_indicator", None).unwrap(),
+                )
+                .unwrap();
+
             Self {
                 device,
                 command_queue,
@@ -76,8 +92,10 @@ impl MetalContext {
                 matrix_multiply_pipeline,
                 matrix_multiply_constant_pipeline,
                 relu_pipeline,
+                vector_multiply_pipeline,
                 softmax_sum_pipeline,
                 softmax_output_pipeline,
+                positive_indicator_pipeline,
             }
         })
     }
@@ -289,6 +307,60 @@ impl MetalContext {
     }
 
     /// Returns a new vector with ReLU applied (max(0, x) for each element).
+    /// Multiply two vectors element-wise
+    pub fn vector_multiply(&self, a: &[f16], b: &[f16]) -> Vec<f16> {
+        assert_eq!(a.len(), b.len(), "Vectors must have the same length!");
+        let array_len = a.len() as u32;
+
+        autoreleasepool(|| {
+            // 1. Create buffers
+            let input_buffer_a = create_buffer(&self.device, a);
+            let input_buffer_b = create_buffer(&self.device, b);
+            let output_buffer = create_buffer(
+                &self.device,
+                vec![f16::from_f32(0.0); array_len as usize].as_slice(),
+            );
+            let array_len_buffer = create_buffer(&self.device, &[array_len]);
+
+            // 2. Create command buffer & encoder
+            let command_buffer = self.command_queue.new_command_buffer();
+            let encoder = command_buffer.new_compute_command_encoder();
+
+            // 3. Set pipeline & buffers
+            encoder.set_compute_pipeline_state(&self.vector_multiply_pipeline);
+            encoder.set_buffer(0, Some(&input_buffer_a), 0);
+            encoder.set_buffer(1, Some(&input_buffer_b), 0);
+            encoder.set_buffer(2, Some(&output_buffer), 0);
+            encoder.set_buffer(3, Some(&array_len_buffer), 0);
+
+            // 4. Determine thread layout (process 4 elements per thread)
+            let num_threads = ((array_len + 3) / 4) as u64;
+            let threadgroup_size = MTLSize {
+                width: self.vector_multiply_pipeline.thread_execution_width(),
+                height: 1,
+                depth: 1,
+            };
+            let threadgroup_count = MTLSize {
+                width: (num_threads + threadgroup_size.width - 1) / threadgroup_size.width,
+                height: 1,
+                depth: 1,
+            };
+
+            // 5. Encode & dispatch
+            encoder.dispatch_thread_groups(threadgroup_count, threadgroup_size);
+            encoder.end_encoding();
+
+            // 6. Commit & wait
+            command_buffer.commit();
+            command_buffer.wait_until_completed();
+
+            // 7. Read results
+            let ptr = output_buffer.contents() as *const f16;
+            let output_slice = unsafe { std::slice::from_raw_parts(ptr, array_len as usize) };
+            output_slice.to_vec()
+        })
+    }
+
     pub fn relu(&self, input: &[f16]) -> Vec<f16> {
         let array_len = input.len() as u32;
 
@@ -315,6 +387,57 @@ impl MetalContext {
             let num_threads = ((array_len + 3) / 4) as u64;
             let threadgroup_size = MTLSize {
                 width: self.relu_pipeline.thread_execution_width(),
+                height: 1,
+                depth: 1,
+            };
+            let threadgroup_count = MTLSize {
+                width: (num_threads + threadgroup_size.width - 1) / threadgroup_size.width,
+                height: 1,
+                depth: 1,
+            };
+
+            // 5. Encode & dispatch
+            encoder.dispatch_thread_groups(threadgroup_count, threadgroup_size);
+            encoder.end_encoding();
+
+            // 6. Commit & wait
+            command_buffer.commit();
+            command_buffer.wait_until_completed();
+
+            // 7. Read results
+            let ptr = output_buffer.contents() as *const f16;
+            let output_slice = unsafe { std::slice::from_raw_parts(ptr, array_len as usize) };
+            output_slice.to_vec()
+        })
+    }
+
+    /// Returns a new vector with 1.0 for positive values and 0.0 for non-positive values.
+    pub fn positive_indicator(&self, input: &[f16]) -> Vec<f16> {
+        let array_len = input.len() as u32;
+
+        autoreleasepool(|| {
+            // 1. Create buffers
+            let input_buffer = create_buffer(&self.device, input);
+            let output_buffer = create_buffer(
+                &self.device,
+                vec![f16::from_f32(0.0); array_len as usize].as_slice(),
+            );
+            let array_len_buffer = create_buffer(&self.device, &[array_len]);
+
+            // 2. Create command buffer & encoder
+            let command_buffer = self.command_queue.new_command_buffer();
+            let encoder = command_buffer.new_compute_command_encoder();
+
+            // 3. Set pipeline & buffers
+            encoder.set_compute_pipeline_state(&self.positive_indicator_pipeline);
+            encoder.set_buffer(0, Some(&input_buffer), 0);
+            encoder.set_buffer(1, Some(&output_buffer), 0);
+            encoder.set_buffer(2, Some(&array_len_buffer), 0);
+
+            // 4. Determine thread layout (process 4 elements per thread)
+            let num_threads = ((array_len + 3) / 4) as u64;
+            let threadgroup_size = MTLSize {
+                width: self.positive_indicator_pipeline.thread_execution_width(),
                 height: 1,
                 depth: 1,
             };
@@ -654,6 +777,68 @@ mod tests {
             "Sum of softmax probabilities should be 1, got {}",
             sum
         );
+    }
+
+    #[test]
+    fn positive_indicator() {
+        let context = MetalContext::new("compute-kernel.metallib");
+
+        // Test data with positive and negative values
+        let input: Vec<f16> = vec![-2.0, -1.0, 0.0, 1.0, 2.0]
+            .into_iter()
+            .map(|x| f16::from_f32(x))
+            .collect();
+
+        let result = context.positive_indicator(&input);
+
+        // Expected results: 1.0 for positive values, 0.0 for non-positive values
+        let expected: Vec<f16> = vec![0.0, 0.0, 0.0, 1.0, 1.0]
+            .into_iter()
+            .map(|x| f16::from_f32(x))
+            .collect();
+
+        assert_eq!(result.len(), expected.len());
+        for (got, want) in result.iter().zip(expected.iter()) {
+            assert!(
+                (got.to_f32() - want.to_f32()).abs() < 1e-3,
+                "Positive indicator results differ: got {:?}, want {:?}",
+                got,
+                want
+            );
+        }
+    }
+
+    #[test]
+    fn vector_multiply() {
+        let context = MetalContext::new("compute-kernel.metallib");
+
+        // Test vectors with various values
+        let a: Vec<f16> = vec![1.0, 2.0, 3.0, 4.0, 5.0]
+            .into_iter()
+            .map(|x| f16::from_f32(x))
+            .collect();
+        let b: Vec<f16> = vec![2.0, 3.0, 4.0, 5.0, 6.0]
+            .into_iter()
+            .map(|x| f16::from_f32(x))
+            .collect();
+
+        let result = context.vector_multiply(&a, &b);
+
+        // Expected results after element-wise multiplication
+        let expected: Vec<f16> = vec![2.0, 6.0, 12.0, 20.0, 30.0]
+            .into_iter()
+            .map(|x| f16::from_f32(x))
+            .collect();
+
+        assert_eq!(result.len(), expected.len());
+        for (got, want) in result.iter().zip(expected.iter()) {
+            assert!(
+                (got.to_f32() - want.to_f32()).abs() < 1e-3,
+                "Vector multiply results differ: got {:?}, want {:?}",
+                got,
+                want
+            );
+        }
     }
 
     #[test]
