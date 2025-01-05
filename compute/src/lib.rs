@@ -12,6 +12,7 @@ pub struct MetalContext {
     dot_product_pipeline: ComputePipelineState,
     matrix_multiply_pipeline: ComputePipelineState,
     matrix_multiply_constant_pipeline: ComputePipelineState,
+    matrix_addition_pipeline: ComputePipelineState,
     relu_pipeline: ComputePipelineState,
     vector_multiply_pipeline: ComputePipelineState,
     softmax_sum_pipeline: ComputePipelineState,
@@ -67,6 +68,12 @@ impl MetalContext {
                 )
                 .unwrap();
 
+            let matrix_addition_pipeline = device
+                .new_compute_pipeline_state_with_function(
+                    &library.get_function("matrix_addition", None).unwrap(),
+                )
+                .unwrap();
+
             let softmax_sum_pipeline = device
                 .new_compute_pipeline_state_with_function(
                     &library.get_function("softmax_sum", None).unwrap(),
@@ -91,12 +98,94 @@ impl MetalContext {
                 dot_product_pipeline,
                 matrix_multiply_pipeline,
                 matrix_multiply_constant_pipeline,
+                matrix_addition_pipeline,
                 relu_pipeline,
                 vector_multiply_pipeline,
                 softmax_sum_pipeline,
                 softmax_output_pipeline,
                 positive_indicator_pipeline,
             }
+        })
+    }
+
+    /// Add two matrices with constant factors (c_a*A + c_b*B)
+    /// Input matrices are row_len x col_len in row-major order.
+    /// Returns a new matrix of the same dimensions.
+    pub fn matrix_addition(
+        &self,
+        a: &[f16],
+        b: &[f16],
+        c_a: f16,
+        c_b: f16,
+        row_len: u32,
+        col_len: u32,
+    ) -> Vec<f16> {
+        let array_len = row_len * col_len;
+        assert_eq!(
+            a.len() as u32,
+            array_len,
+            "Matrix A dimensions don't match input length"
+        );
+        assert_eq!(
+            b.len() as u32,
+            array_len,
+            "Matrix B dimensions don't match input length"
+        );
+
+        autoreleasepool(|| {
+            // 1. Create buffers
+            let input_buffer_a = create_buffer(&self.device, a);
+            let input_buffer_b = create_buffer(&self.device, b);
+            let c_a_buffer = create_buffer(&self.device, &[c_a]);
+            let c_b_buffer = create_buffer(&self.device, &[c_b]);
+            let output_buffer = create_buffer(
+                &self.device,
+                vec![f16::from_f32(0.0); array_len as usize].as_slice(),
+            );
+            let row_len_buffer = create_buffer(&self.device, &[row_len]);
+            let col_len_buffer = create_buffer(&self.device, &[col_len]);
+
+            // 2. Create command buffer & encoder
+            let command_buffer = self.command_queue.new_command_buffer();
+            let encoder = command_buffer.new_compute_command_encoder();
+
+            // 3. Set pipeline & buffers
+            encoder.set_compute_pipeline_state(&self.matrix_addition_pipeline);
+            encoder.set_buffer(0, Some(&input_buffer_a), 0);
+            encoder.set_buffer(1, Some(&c_a_buffer), 0);
+            encoder.set_buffer(2, Some(&input_buffer_b), 0);
+            encoder.set_buffer(3, Some(&c_b_buffer), 0);
+            encoder.set_buffer(4, Some(&output_buffer), 0);
+            encoder.set_buffer(5, Some(&row_len_buffer), 0);
+            encoder.set_buffer(6, Some(&col_len_buffer), 0);
+
+            // 4. Determine thread layout (process 4 elements per thread in y dimension)
+            let threadgroup_size = MTLSize {
+                width: self.matrix_addition_pipeline.thread_execution_width(),
+                height: 1,
+                depth: 1,
+            };
+            let col_threads = (col_len as u64 + 3) / 4;
+            let threadgroup_count = MTLSize {
+                width: ((row_len as u64 + threadgroup_size.width - 1) / threadgroup_size.width)
+                    as u64,
+                height: ((col_threads + threadgroup_size.width - 1) / threadgroup_size.width)
+                    as u64,
+                depth: 1,
+            };
+
+            // 5. Encode & dispatch
+            encoder.dispatch_thread_groups(threadgroup_count, threadgroup_size);
+            encoder.end_encoding();
+
+            // 6. Commit & wait
+            command_buffer.commit();
+            command_buffer.wait_until_completed();
+
+            // 7. Read results
+            let ptr = output_buffer.contents() as *const f16;
+            let output_slice = unsafe { std::slice::from_raw_parts(ptr, array_len as usize) };
+            output_slice.to_vec()
         })
     }
 
@@ -700,6 +789,54 @@ mod tests {
                 "GPU and CPU results differ significantly\nGPU result (incorrect): {:?}\nCPU result (correct): {:?}",
                 gpu_result,
                 cpu_result
+            );
+        }
+    }
+
+    #[test]
+    fn matrix_addition() {
+        let context = MetalContext::new("compute-kernel.metallib");
+
+        // Test matrix 3x3
+        let row_len = 3;
+        let col_len = 3;
+        let a: Vec<f16> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+            .into_iter()
+            .map(|x| f16::from_f32(x))
+            .collect();
+        let b: Vec<f16> = vec![9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]
+            .into_iter()
+            .map(|x| f16::from_f32(x))
+            .collect();
+
+        let c_a = f16::from_f32(2.0); // multiply first matrix by 2
+        let c_b = f16::from_f32(3.0); // multiply second matrix by 3
+
+        let result = context.matrix_addition(&a, &b, c_a, c_b, row_len, col_len);
+
+        // Expected results: 2*A + 3*B
+        let expected: Vec<f16> = vec![
+            2.0 * 1.0 + 3.0 * 9.0,
+            2.0 * 2.0 + 3.0 * 8.0,
+            2.0 * 3.0 + 3.0 * 7.0,
+            2.0 * 4.0 + 3.0 * 6.0,
+            2.0 * 5.0 + 3.0 * 5.0,
+            2.0 * 6.0 + 3.0 * 4.0,
+            2.0 * 7.0 + 3.0 * 3.0,
+            2.0 * 8.0 + 3.0 * 2.0,
+            2.0 * 9.0 + 3.0 * 1.0,
+        ]
+        .into_iter()
+        .map(|x| f16::from_f32(x))
+        .collect();
+
+        assert_eq!(result.len(), expected.len());
+        for (got, want) in result.iter().zip(expected.iter()) {
+            assert!(
+                (got.to_f32() - want.to_f32()).abs() < 1e-3,
+                "Matrix addition results differ: got {:?}, want {:?}",
+                got,
+                want
             );
         }
     }
