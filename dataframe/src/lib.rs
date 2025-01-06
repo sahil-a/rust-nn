@@ -1,13 +1,43 @@
 use half::f16;
 use memmap::{Mmap, MmapOptions};
+use rand::Rng;
 use std::error::Error;
 use std::fs::{remove_file, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::str::FromStr;
 
-// TODO: restructure header writes
-// TODO: column names need to be comma separated
+fn write_header(
+    writer: &mut BufWriter<std::fs::File>,
+    rows: usize,
+    cols: usize,
+    col_sizes: &[usize],
+    col_names: &[String],
+) -> Result<usize, std::io::Error> {
+    // header format: num rows, cols, col sizes, col names
+    writer.write(&rows.to_ne_bytes())?;
+    writer.write(&cols.to_ne_bytes())?;
+    for size in col_sizes {
+        writer.write(&size.to_ne_bytes())?;
+    }
+    let newline = "\n".as_bytes();
+    for (i, name) in col_names.iter().enumerate() {
+        writer.write(name.as_bytes())?;
+        if i < col_names.len() - 1 {
+            writer.write(",".as_bytes())?;
+        }
+    }
+    writer.write(newline)?;
+
+    // compute and return the number of bytes written
+    let usize_bytes: usize = (usize::BITS / 8) as usize;
+    Ok(usize_bytes
+        + usize_bytes
+        + (usize_bytes * cols)
+        + col_names.iter().map(|s| s.len()).sum::<usize>()
+        + if cols > 0 { cols - 1 } else { 0 }  // Account for commas
+        + 1) // Newline
+}
 
 #[derive(Debug)]
 pub struct DataFrame {
@@ -16,6 +46,9 @@ pub struct DataFrame {
     data_start: usize,
     pub rows: usize,
     pub cols: usize,
+    // default train/val/test split is even
+    val_start: usize,
+    test_start: usize,
     pub col_sizes: Vec<usize>,
     pub col_starts: Vec<usize>, // prefix sum of `col_sizes`
     pub col_size: usize,        // sum of `col_sizes`
@@ -24,6 +57,12 @@ pub struct DataFrame {
 }
 
 const FILE_TYPE: &str = ".df";
+
+pub enum DataSegment {
+    Train,
+    Val,
+    Test,
+}
 
 // Custom drop implementation to delete the file that backs the DF (unless permanent)
 impl Drop for DataFrame {
@@ -43,11 +82,90 @@ fn round(value: f16, places: i32) -> f16 {
 // A DataFrame is mmaped - if we iterate row by row, we'll never need to have the whole DF in
 // memory
 impl DataFrame {
-    // TODO: load from .df file
-
     // make the file backing this DF permanent
     pub fn write(&mut self) {
         self.permanent = true;
+    }
+
+    // Restructures the train/val/test split
+    pub fn train_val_test_split(
+        &mut self,
+        train_weight: usize,
+        val_weight: usize,
+        test_weight: usize,
+    ) {
+        let sum = (train_weight + val_weight + test_weight) as f32;
+        let train_percentage = (train_weight as f32) / (sum);
+        let val_percentage = (train_weight as f32) / (sum);
+        let train_rows = ((self.rows as f32) * train_percentage) as usize;
+        let val_rows = ((self.rows as f32) * val_percentage) as usize;
+
+        self.val_start = train_rows;
+        self.test_start = train_rows + val_rows;
+    }
+
+    pub fn shuffle(&mut self, segment: DataSegment) -> Result<(), std::io::Error> {
+        let mut fd1 = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.file_name)?;
+        let mut fd2 = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.file_name)?;
+
+        // for each row in the segment, pick a random remaining row to swap
+        let start_row = match segment {
+            DataSegment::Train => 0,
+            DataSegment::Val => self.val_start,
+            DataSegment::Test => self.test_start,
+        };
+
+        let num_rows = match segment {
+            DataSegment::Train => self.val_start,
+            DataSegment::Val => self.test_start - self.val_start,
+            DataSegment::Test => self.rows - self.test_start,
+        };
+
+        let mut buffer1 = vec![0u8; 2 * self.col_size];
+        let mut buffer2 = vec![0u8; 2 * self.col_size];
+
+        for i in start_row..(start_row + num_rows) {
+            fd1.seek(SeekFrom::Start(
+                (self.data_start + (i * self.col_size * 2)) as u64,
+            ))?;
+            fd1.read_exact(&mut buffer1)?;
+            let j = rand::thread_rng().gen_range(i..start_row + num_rows);
+            fd2.seek(SeekFrom::Start(
+                (self.data_start + (j * self.col_size * 2)) as u64,
+            ))?;
+            fd2.read_exact(&mut buffer2)?;
+
+            // Write row j to position i
+            fd1.seek(SeekFrom::Start(
+                (self.data_start + (i * self.col_size * 2)) as u64,
+            ))?;
+            fd1.write_all(&buffer2)?;
+
+            // Write row i to position j
+            fd2.seek(SeekFrom::Start(
+                (self.data_start + (j * self.col_size * 2)) as u64,
+            ))?;
+            fd2.write_all(&buffer1)?;
+        }
+
+        // Drop existing file descriptors
+        drop(fd1);
+        drop(fd2);
+
+        // Recreate the mmap
+        let read_fd = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(&self.file_name)?;
+        self.mmap = unsafe { MmapOptions::new().map(&read_fd)? };
+
+        Ok(())
     }
 
     pub fn log(&self, rows: usize) {
@@ -116,12 +234,21 @@ impl DataFrame {
         self.transform(to_name, f)
     }
 
-    // TODO: assert that cols are size 1
     pub fn expand_categorical(
         &self,
         to_name: &str,
         cols: Vec<usize>,
     ) -> Result<DataFrame, Box<dyn Error>> {
+        // Verify all specified columns have size 1
+        for &col in cols.iter() {
+            if self.col_sizes[col] != 1 {
+                return Err(format!(
+                    "Column {} must have size 1 for categorical expansion, but has size {}",
+                    self.col_names[col], self.col_sizes[col]
+                )
+                .into());
+            }
+        }
         let mut to_col_sizes = self.col_sizes.clone();
         for i in 0..self.rows {
             for c in cols.iter().copied() {
@@ -189,27 +316,14 @@ impl DataFrame {
             .open(df_file_name.clone())?;
         let mut writer = BufWriter::new(write_fd);
 
-        // write header: num rows, cols, col sizes, col names
-        writer.write(&self.rows.to_ne_bytes())?;
-        writer.write(&self.cols.to_ne_bytes())?;
-        let mut to_col_size: usize = 0;
-        for i in 0..self.cols {
-            writer.write(&to_col_sizes[i].to_ne_bytes())?;
-            to_col_size += to_col_sizes[i];
-        }
-        let newline = "\n".as_bytes();
-        for i in 0..self.cols {
-            writer.write(self.col_names[i].as_bytes())?;
-        }
-        writer.write(newline)?;
-
-        // compute the number of bytes written so far
-        let usize_bytes: usize = (usize::BITS / 8) as usize;
-        let bytes_written = usize_bytes
-            + usize_bytes
-            + (usize_bytes * self.cols)
-            + self.col_names.iter().map(|s| s.len()).sum::<usize>()
-            + 1;
+        let to_col_size: usize = to_col_sizes.iter().sum();
+        let bytes_written = write_header(
+            &mut writer,
+            self.rows,
+            self.cols,
+            &to_col_sizes,
+            &self.col_names,
+        )?;
 
         // write mapped data
         for i in 0..self.rows {
@@ -244,6 +358,8 @@ impl DataFrame {
             data_start: bytes_written,
             col_size: to_col_size,
             permanent: false,
+            val_start: self.val_start,
+            test_start: self.test_start,
         })
     }
 
@@ -253,16 +369,122 @@ impl DataFrame {
         f16::from_ne_bytes(bytes)
     }
 
-    // TODO: shouldn't need to iter if possible
     pub fn get_row(&self, i: usize) -> Vec<f16> {
-        let mut res = vec![f16::ZERO; self.col_size];
-        let mut loc = self.data_start + ((i * self.col_size) * 2);
-        for j in 0..self.col_size {
-            let bytes = unsafe { *(self.mmap[loc..=loc + 1].as_ptr() as *const [u8; 2]) };
-            res[j] = f16::from_ne_bytes(bytes);
-            loc += 2;
+        let start = self.data_start + (i * self.col_size * 2);
+        let end = start + (self.col_size * 2);
+
+        // Safety: We know the mmap contains valid f16 data in native endian format
+        // and we're staying within bounds of the allocation
+        unsafe {
+            let ptr = self.mmap[start..end].as_ptr() as *const f16;
+            // Create a slice from the raw pointer without taking ownership
+            std::slice::from_raw_parts(ptr, self.col_size).to_vec()
         }
-        res
+    }
+
+    pub fn get_batch(
+        &self,
+        batch_num: usize,
+        batch_size: usize,
+        segment: DataSegment,
+    ) -> Vec<Vec<f16>> {
+        let (start_row, end_row) = match segment {
+            DataSegment::Train => (0, self.val_start),
+            DataSegment::Val => (self.val_start, self.test_start),
+            DataSegment::Test => (self.test_start, self.rows),
+        };
+
+        let batch_start = start_row + (batch_num * batch_size);
+
+        if batch_start >= end_row {
+            return Vec::new();
+        }
+
+        let available_rows = end_row - batch_start;
+        let actual_batch_size = batch_size.min(available_rows);
+
+        let mut batch = Vec::with_capacity(actual_batch_size);
+
+        for i in 0..actual_batch_size {
+            let row_idx = batch_start + i;
+            batch.push(self.get_row(row_idx));
+        }
+
+        batch
+    }
+
+    pub fn get_data_segment_size(&self, segment: DataSegment) -> usize {
+        match segment {
+            DataSegment::Train => self.val_start,
+            DataSegment::Val => self.test_start - self.val_start,
+            DataSegment::Test => self.rows - self.test_start,
+        }
+    }
+
+    pub fn load_df(file: &str) -> Result<DataFrame, Box<dyn Error>> {
+        let read_fd = OpenOptions::new().read(true).write(false).open(file)?;
+        let mmap = unsafe { MmapOptions::new().map(&read_fd)? };
+
+        // Read header: num rows, cols, col sizes
+        let usize_bytes = (usize::BITS / 8) as usize;
+        let mut pos = 0;
+
+        // Read rows and cols
+        let rows = usize::from_ne_bytes(mmap[pos..pos + usize_bytes].try_into()?);
+        pos += usize_bytes;
+        let cols = usize::from_ne_bytes(mmap[pos..pos + usize_bytes].try_into()?);
+        pos += usize_bytes;
+
+        // Read column sizes
+        let mut col_sizes = Vec::with_capacity(cols);
+        for _ in 0..cols {
+            let size = usize::from_ne_bytes(mmap[pos..pos + usize_bytes].try_into()?);
+            col_sizes.push(size);
+            pos += usize_bytes;
+        }
+
+        // Read column names until newline
+        let mut col_names = Vec::with_capacity(cols);
+        let mut name_buf = String::new();
+        while pos < mmap.len() && mmap[pos] as char != '\n' {
+            if mmap[pos] as char == ',' {
+                col_names.push(name_buf);
+                name_buf = String::new();
+            } else {
+                name_buf.push(mmap[pos] as char);
+            }
+            pos += 1;
+        }
+        col_names.push(name_buf); // Push final name
+        pos += 1; // Skip newline
+
+        // Calculate column starts
+        let mut col_starts = vec![0; cols];
+        let mut prefix_sum = 0;
+        for j in 0..cols {
+            col_starts[j] = prefix_sum;
+            prefix_sum += col_sizes[j];
+        }
+
+        let col_size: usize = col_sizes.iter().sum();
+        let mut df = DataFrame {
+            file_name: file.to_string(),
+            mmap,
+            rows,
+            cols,
+            col_sizes,
+            col_starts,
+            col_names,
+            col_size,
+            data_start: pos,
+            permanent: true, // Since we're loading an existing file
+            val_start: 0,
+            test_start: 0,
+        };
+
+        df.train_val_test_split(1, 1, 1);
+
+        Ok(df)
     }
 
     pub fn from_file(file: &str) -> Result<DataFrame, Box<dyn Error>> {
@@ -291,31 +513,10 @@ impl DataFrame {
             .open(df_file_name.clone())?;
         let mut writer = BufWriter::new(write_fd);
 
-        // write num rows, cols
-        writer.write(&num_rows.to_ne_bytes())?;
-        writer.write(&num_cols.to_ne_bytes())?;
-
-        // write column vector vector lengths
         let one: usize = 1;
         let col_lens = vec![one; num_cols];
-        for _ in 0..num_cols {
-            writer.write(&one.to_ne_bytes())?;
-        }
-
-        // write column names
-        let newline = "\n".as_bytes();
-        for i in 0..num_cols {
-            writer.write(column_names[i].as_bytes())?;
-        }
-        writer.write(newline)?;
-
-        // compute the number of bytes written so far
-        let usize_bytes: usize = (usize::BITS / 8) as usize;
-        let bytes_written = usize_bytes
-            + usize_bytes
-            + (usize_bytes * num_cols)
-            + column_names.iter().map(|s| s.len()).sum::<usize>()
-            + 1;
+        let bytes_written =
+            write_header(&mut writer, num_rows, num_cols, &col_lens, &column_names)?;
 
         // write data
         for record in csv_reader.records() {
@@ -338,7 +539,7 @@ impl DataFrame {
             col_starts[j] = j;
         }
 
-        Ok(DataFrame {
+        let mut df = DataFrame {
             file_name: df_file_name,
             mmap,
             rows: num_rows,
@@ -349,6 +550,12 @@ impl DataFrame {
             col_size: num_cols,
             data_start: bytes_written,
             permanent: false,
-        })
+            val_start: 0,
+            test_start: 0,
+        };
+
+        df.train_val_test_split(1, 1, 1);
+
+        Ok(df)
     }
 }
