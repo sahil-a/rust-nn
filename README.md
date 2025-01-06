@@ -17,7 +17,8 @@ dataframe/Cargo.toml
 9-csv = "1.3.0"
 10-half = "2.4.1"
 11-memmap = "0.7.0"
-12-
+12-rand = "0.8.5"
+13-
 
 compute/Cargo.toml
 9:[dependencies]
