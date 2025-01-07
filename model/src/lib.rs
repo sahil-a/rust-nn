@@ -1,105 +1,142 @@
-use core::fmt;
-use std::fmt::Display;
-
-// TODO: split up with `mod`
-
-pub struct ModelSchema {
-    pub num_layers: usize,
-    pub input_size: usize,
-    pub masks: Vec<Mask>,
-}
+use compute::{get_metal_context, GPUBuffer};
+use half::f16;
 
 pub struct Model {
-    pub layers: Vec<Layer>,
-    pub schema: ModelSchema,
-}
-
-// grid[i][j] true if output i inputs j
-// rows correspond to outputs
-pub struct Mask {
-    pub grid: Vec<Vec<bool>>,
-}
-
-#[derive(Clone)]
-pub struct Layer {}
-
-impl Mask {
-    pub fn input_size(&self) -> usize {
-        match self.grid.first() {
-            Some(x) => x.len(),
-            None => 0,
-        }
-    }
-
-    pub fn output_size(&self) -> usize {
-        self.grid.len()
-    }
-
-    pub fn fully_connected(input_size: usize, output_size: usize) -> Mask {
-        Mask {
-            grid: vec![vec![true; input_size]; output_size],
-        }
-    }
-}
-
-impl ModelSchema {
-    pub fn new(input_size: usize) -> ModelSchema {
-        ModelSchema {
-            num_layers: 0,
-            input_size,
-            masks: vec![],
-        }
-    }
-
-    pub fn current_output_size(&self) -> usize {
-        match self.masks.last() {
-            Some(last) => last.output_size(),
-            None => self.input_size,
-        }
-    }
-
-    pub fn add_layer(&mut self, mask: Mask) -> Result<(), String> {
-        if mask.input_size() != self.current_output_size() {
-            return Err(String::from(format!(
-                "mask is incorrectly sized: previous output size was {}, but mask expects {}",
-                self.current_output_size(),
-                mask.input_size()
-            )));
-        }
-
-        self.num_layers += 1;
-        self.masks.push(mask);
-        Ok(())
-    }
-}
-
-impl Display for ModelSchema {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(
-            f,
-            "model schema with {} layers and {} output size",
-            self.num_layers,
-            self.current_output_size()
-        )
-    }
+    loss_fn: Box<dyn LossFn>,
+    layers: Vec<Box<dyn Layer>>,
 }
 
 impl Model {
-    pub fn build(schema: ModelSchema) -> Model {
-        Model {
-            layers: vec![Layer {}; schema.num_layers],
-            schema,
+    fn layers(&mut self) -> &mut Vec<Box<dyn Layer>> {
+        &mut self.layers
+    }
+
+    fn inference(&mut self, input: &GPUBuffer, output: &GPUBuffer) {
+        let first = &self.layers[0];
+        get_metal_context().copy(input, first.input());
+        for i in 0..self.layers.len() - 1 {
+            self.layers[i].forward(self.layers[i + 1].input())
         }
+        let last = &self.layers[self.layers.len() - 1];
+        last.forward(output)
+    }
+
+    fn forward_backward(
+        &mut self,
+        input: &GPUBuffer,
+        output: &GPUBuffer,
+        gradients: Vec<&GPUBuffer>,
+    ) {
+        // TODO
     }
 }
 
-// Potential Extension:
-//
-// Model and ModelSchema keeps whole model in memory
-// Upgrade this so that accesses to layers are abstracted behind a function
-// and only N sliding layers are in memory at once.
-//
-// Despite batching, this still might not be practical - too much disk I/O during training.
-// and inference because we need access to all layers
-//
-// This would allow you to have model sizes > memory.
+pub struct ModelBuilder {
+    input_size: usize,
+    output_size: usize,
+    layers: Vec<Box<dyn Layer>>,
+}
+
+impl ModelBuilder {
+    pub fn input_size(input_size: usize) -> Self {
+        Self {
+            input_size,
+            output_size: 0,
+            layers: vec![],
+        }
+    }
+    pub fn layer(self, layer: Box<dyn Layer>) -> Result<Self, String> {
+        if !self.layers.is_empty() && layer.input_size() != self.output_size {
+            return Err(format!(
+                "Layer input size {} does not match previous layer output size {}",
+                layer.input_size(),
+                self.output_size
+            ));
+        }
+
+        let output_size = layer.output_size();
+        Ok(Self {
+            input_size: self.input_size,
+            output_size,
+            layers: {
+                let mut layers = self.layers;
+                layers.push(layer);
+                layers
+            },
+        })
+    }
+
+    pub fn loss_fn(self, loss_fn: Box<dyn LossFn>) -> Result<Model, String> {
+        if self.layers.is_empty() {
+            return Err("Model must have at least one layer".to_string());
+        }
+        Ok(Model {
+            loss_fn,
+            layers: self.layers,
+        })
+    }
+}
+
+pub trait Layer {
+    fn input_size(&self) -> usize;
+    fn output_size(&self) -> usize;
+    fn input(&self) -> &GPUBuffer; // layers should own a copy of their last input
+    fn forward(&self, output: &GPUBuffer);
+    // computes gradient wrt input and gradient wrt weights
+    fn backward(
+        &self,
+        gradient_wrt_output: &GPUBuffer,
+        gradient_wrt_input: &GPUBuffer,
+        gradient_wrt_weights: &GPUBuffer,
+    );
+    fn weights(&mut self) -> &mut GPUBuffer;
+    fn mask(&mut self) -> &mut GPUBuffer;
+}
+
+pub trait LossFn {
+    // computes gradient wrt input and returns loss
+    fn loss(self, input: GPUBuffer, target: &GPUBuffer, gradient: &GPUBuffer) -> f16;
+}
+
+pub struct FullyConnectedLayer {
+    weights: GPUBuffer,
+    mask: GPUBuffer,
+    buffer: GPUBuffer,
+}
+
+// TODO
+impl Layer for FullyConnectedLayer {
+    fn input_size(&self) -> usize {
+        0
+    }
+    fn input(&self) -> &GPUBuffer {
+        &self.buffer
+    }
+    fn output_size(&self) -> usize {
+        0
+    }
+    fn forward(&self, output: &GPUBuffer) {}
+    // computes gradient wrt input and gradient wrt weights
+    fn backward(
+        &self,
+        gradient_wrt_output: &GPUBuffer,
+        gradient_wrt_input: &GPUBuffer,
+        gradient_wrt_weights: &GPUBuffer,
+    ) {
+    }
+    fn weights(&mut self) -> &mut GPUBuffer {
+        &mut self.weights
+    }
+    fn mask(&mut self) -> &mut GPUBuffer {
+        &mut self.mask
+    }
+}
+
+pub struct CrossEntropyLoss {}
+
+impl LossFn for CrossEntropyLoss {
+    fn loss(self, input: GPUBuffer, target: &GPUBuffer, gradient: &GPUBuffer) -> f16 {
+        // TODO
+        f16::ZERO
+    }
+}
