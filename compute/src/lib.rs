@@ -33,14 +33,6 @@ impl GPUBuffer {
         let ptr = self.buffer.contents() as *const f16;
         unsafe { std::slice::from_raw_parts(ptr, array_len).to_vec() }
     }
-
-    pub fn rows(&self) -> usize {
-        self.rows
-    }
-
-    pub fn cols(&self) -> usize {
-        self.cols
-    }
 }
 
 /// A reusable context holding Metal device, command queue, and precompiled pipelines.
