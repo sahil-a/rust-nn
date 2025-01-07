@@ -1,3 +1,4 @@
+use compute::*;
 use dataframe::*;
 use std::error::Error;
 
@@ -5,6 +6,7 @@ const INPUT_CSV_FILE: &str = "data/heart_statlog_cleveland_hungary_final.csv";
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("starting!");
+    initialize_metal_context_from("compute/compute-kernel.metallib");
 
     let mut df = DataFrame::from_file(INPUT_CSV_FILE)?;
     df.log(5);

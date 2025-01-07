@@ -9,9 +9,15 @@ use std::sync::Once;
 static mut GLOBAL_CONTEXT: Option<MetalContext> = None;
 static INIT: Once = Once::new();
 
-pub fn initialize_metal_context(library_path: &str) {
+pub fn initialize_metal_context() {
     INIT.call_once(|| unsafe {
-        GLOBAL_CONTEXT = Some(MetalContext::new(library_path));
+        GLOBAL_CONTEXT = Some(MetalContext::new("compute-kernel.metallib"));
+    });
+}
+
+pub fn initialize_metal_context_from(path: &str) {
+    INIT.call_once(|| unsafe {
+        GLOBAL_CONTEXT = Some(MetalContext::new(path));
     });
 }
 
@@ -659,7 +665,7 @@ mod tests {
 
     #[test]
     fn matrix_multiply() {
-        initialize_metal_context("compute-kernel.metallib");
+        initialize_metal_context();
         let context = get_metal_context();
         let row_len = 258;
         let inner_len = 256;
@@ -705,7 +711,7 @@ mod tests {
 
     #[test]
     fn matrix_multiply_transposed() {
-        initialize_metal_context("compute-kernel.metallib");
+        initialize_metal_context();
         let context = get_metal_context();
         let row_len = 5;
         let inner_len = 5;
@@ -762,7 +768,7 @@ mod tests {
 
     #[test]
     fn matrix_addition() {
-        initialize_metal_context("compute-kernel.metallib");
+        initialize_metal_context();
         let context = get_metal_context();
         let row_len = 3;
         let col_len = 3;
@@ -808,7 +814,7 @@ mod tests {
 
     #[test]
     fn matrix_multiply_rowwise() {
-        initialize_metal_context("compute-kernel.metallib");
+        initialize_metal_context();
         let context = get_metal_context();
         let row_len = 3;
         let col_len = 4;
@@ -861,7 +867,7 @@ mod tests {
 
     #[test]
     fn matrix_multiply_constant() {
-        initialize_metal_context("compute-kernel.metallib");
+        initialize_metal_context();
         let context = get_metal_context();
         let row_len = 3;
         let col_len = 3;
@@ -896,7 +902,7 @@ mod tests {
 
     #[test]
     fn softmax() {
-        initialize_metal_context("compute-kernel.metallib");
+        initialize_metal_context();
         let context = get_metal_context();
         let input: Vec<f16> = vec![-2.0, -1.0, 0.0, 1.0, 2.0]
             .into_iter()
@@ -919,7 +925,7 @@ mod tests {
 
     #[test]
     fn positive_indicator() {
-        initialize_metal_context("compute-kernel.metallib");
+        initialize_metal_context();
         let context = get_metal_context();
         let input: Vec<f16> = vec![-2.0, -1.0, 0.0, 1.0, 2.0]
             .into_iter()
@@ -944,7 +950,7 @@ mod tests {
 
     #[test]
     fn vector_multiply() {
-        initialize_metal_context("compute-kernel.metallib");
+        initialize_metal_context();
         let context = get_metal_context();
         let a: Vec<f16> = vec![1.0, 2.0, 3.0, 4.0, 5.0]
             .into_iter()
@@ -975,7 +981,7 @@ mod tests {
 
     #[test]
     fn relu() {
-        initialize_metal_context("compute-kernel.metallib");
+        initialize_metal_context();
         let context = get_metal_context();
         let input: Vec<f16> = vec![-2.0, -1.0, 0.0, 1.0, 2.0]
             .into_iter()
@@ -1000,7 +1006,7 @@ mod tests {
 
     #[test]
     fn benchmark_matrix_multiply() {
-        initialize_metal_context("compute-kernel.metallib");
+        initialize_metal_context();
         let context = get_metal_context();
         let row_len = 1024;
         let inner_len = 1024;

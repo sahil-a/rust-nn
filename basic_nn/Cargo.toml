@@ -10,3 +10,4 @@ csv = "1.3.0"
 half = "2.4.1"
 dataframe = { path = "../dataframe" }
 model = { path = "../model" }
+compute = { path = "../compute" }

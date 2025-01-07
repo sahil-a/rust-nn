@@ -6,6 +6,7 @@ version = 3
 name = "basic_nn"
 version = "0.1.0"
 dependencies = [
+ "compute",
  "csv",
  "dataframe",
  "half",
