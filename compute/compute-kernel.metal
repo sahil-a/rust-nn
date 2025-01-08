@@ -7,48 +7,9 @@ using namespace metal;
 // && xcrun metallib sumshader.air -o sumshader.metallib
 
 
-// 2 3 5 1 6 9 2 2 9 (example which terminates at stride=32)
-// 5 3 6 1 15 9 4 2 9 (stride = 2)
-// 11 3 6 1 19 9 4 2 9 (stride = 4)
-// 30 3 6 1 19 9 4 2 9 (stride = 8)
-// 39 3 6 1 19 9 4 2 9 (stride = 16)
-kernel void sum_parallel(const device half *data [[ buffer(0) ]], 
-                            volatile device atomic_uint *sum [[ buffer(1) ]],
-                            const device uint *array_len [[ buffer(2) ]],
-                            uint gid [[ thread_position_in_grid ]],
-                            uint tid [[ threadgroup_position_in_grid ]],
-                            uint lid [[ thread_position_in_threadgroup ]],
-                            uint threads_per_threadgroup [[ threads_per_threadgroup ]],
-                            //uint simd_per_threadgroup [[ simdgroups_per_threadgroup ]],
-                            threadgroup half *shared_mem [[ threadgroup(0) ]])
-{
-    // this thread group should load all data
-    if (gid < *array_len) {
-        shared_mem[lid] = data[gid]; // for dot product, you would multiply here
-    } else {
-        shared_mem[lid] = 0;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    // parallel reduction within each threadgroup
-    for (uint stride = 2; stride/2 < threads_per_threadgroup; stride <<= 1) {
-        if (lid % stride == 0 && (lid + stride/2 < threads_per_threadgroup)) {
-            shared_mem[lid] += shared_mem[lid + stride/2];
-        }
-        // synchronization needed per stride
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-    
-    // write the final result to the output
-    if (lid == 0) {
-        atomic_fetch_add_explicit(sum, (uint)shared_mem[0], memory_order_relaxed);
-    }
-}
-
-// same as above, with one line change for multiplication
 kernel void dot_product(const device half *a [[ buffer(0) ]], 
                             const device half *b [[ buffer(1) ]],
-                            volatile device atomic_uint *output [[ buffer(2) ]],
+                            volatile device atomic_float *output [[ buffer(2) ]],
                             const device uint *array_len [[ buffer(3) ]],
                             uint gid [[ thread_position_in_grid ]],
                             uint tid [[ threadgroup_position_in_grid ]],
@@ -76,7 +37,7 @@ kernel void dot_product(const device half *a [[ buffer(0) ]],
     
     // add the final result to the output
     if (lid == 0) {
-        atomic_fetch_add_explicit(output, (uint)shared_mem[0], memory_order_relaxed);
+        atomic_fetch_add_explicit(output, float(shared_mem[0]), memory_order_relaxed);
     }
 }
 

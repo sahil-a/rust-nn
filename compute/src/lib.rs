@@ -185,11 +185,6 @@ impl MetalContext {
         c_a: f16,
         c_b: f16,
     ) {
-        assert_eq!(input_a.rows, input_b.rows);
-        assert_eq!(input_a.cols, input_b.cols);
-        assert_eq!(input_a.rows, output.rows);
-        assert_eq!(input_a.cols, output.cols);
-
         let row_len = input_a.rows as u32;
         let col_len = input_a.cols as u32;
 
@@ -382,14 +377,14 @@ impl MetalContext {
 
     /// Compute the dot product of two half-precision vectors on the GPU.
     /// Returns the resulting sum as a `u32`.
-    pub fn dot_product(&self, a: &GPUBuffer, b: &GPUBuffer) -> u32 {
+    pub fn dot_product(&self, a: &GPUBuffer, b: &GPUBuffer) -> f32 {
         assert_eq!(a.rows, b.rows);
         assert_eq!(a.cols, b.cols);
 
         let array_len = (a.rows * a.cols) as u32;
 
         autoreleasepool(|| {
-            let output_buffer = create_buffer(&self.device, &[0u32]);
+            let output_buffer = create_buffer(&self.device, &[0.0f32]);
             let arraylen_buffer = create_buffer(&self.device, &[array_len]);
 
             let command_buffer = self.command_queue.new_command_buffer();
@@ -424,7 +419,7 @@ impl MetalContext {
             command_buffer.commit();
             command_buffer.wait_until_completed();
 
-            let ptr = output_buffer.contents() as *mut u32;
+            let ptr = output_buffer.contents() as *mut f32;
             unsafe { *ptr }
         })
     }
@@ -703,6 +698,36 @@ mod tests {
             }
         }
         result
+    }
+
+    #[test]
+    fn dot_product() {
+        initialize_metal_context();
+        let context = get_metal_context();
+
+        let a: Vec<f16> = vec![1.0, 2.0, 3.0, 4.0, 5.0]
+            .into_iter()
+            .map(f16::from_f32)
+            .collect();
+        let b: Vec<f16> = vec![2.0, 3.0, 4.0, 5.0, 6.0]
+            .into_iter()
+            .map(f16::from_f32)
+            .collect();
+
+        let gpu_a = GPUBuffer::from_vec(1, a.len(), &a);
+        let gpu_b = GPUBuffer::from_vec(1, b.len(), &b);
+
+        let result = context.dot_product(&gpu_a, &gpu_b);
+
+        // Calculate expected result: 1*2 + 2*3 + 3*4 + 4*5 + 5*6 = 70
+        let expected = 70.0f32;
+
+        assert!(
+            (result - expected).abs() < 1e-3,
+            "Dot product result {} did not match expected {}",
+            result,
+            expected
+        );
     }
 
     #[test]

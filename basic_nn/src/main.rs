@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut df = DataFrame::from_file(INPUT_CSV_FILE)?;
     df.log(5);
     df = df
-        .expand_categorical("expanded", vec![1, 2, 5, 6, 8, 10])?
+        .expand_categorical("expanded", vec![1, 2, 5, 6, 8, 10, 11])?
         .normalize("expanded_and_normalized", vec![0, 3, 4, 7, 9])?;
     df.log(15);
     df.write();
