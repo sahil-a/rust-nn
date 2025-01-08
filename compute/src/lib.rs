@@ -67,7 +67,6 @@ pub struct MetalContext {
     matrix_multiply_pipeline: ComputePipelineState,
     matrix_multiply_constant_pipeline: ComputePipelineState,
     matrix_multiply_rowwise_pipeline: ComputePipelineState,
-    matrix_multiply_rowwise_in_place_pipeline: ComputePipelineState,
     matrix_addition_pipeline: ComputePipelineState,
     relu_pipeline: ComputePipelineState,
     vector_multiply_pipeline: ComputePipelineState,
@@ -126,14 +125,6 @@ impl MetalContext {
                 )
                 .unwrap();
 
-            let matrix_multiply_rowwise_in_place_pipeline = device
-                .new_compute_pipeline_state_with_function(
-                    &library
-                        .get_function("matrix_multiply_rowwise_in_place", None)
-                        .unwrap(),
-                )
-                .unwrap();
-
             let matrix_addition_pipeline = device
                 .new_compute_pipeline_state_with_function(
                     &library.get_function("matrix_addition", None).unwrap(),
@@ -165,7 +156,6 @@ impl MetalContext {
                 matrix_multiply_pipeline,
                 matrix_multiply_constant_pipeline,
                 matrix_multiply_rowwise_pipeline,
-                matrix_multiply_rowwise_in_place_pipeline,
                 matrix_addition_pipeline,
                 relu_pipeline,
                 vector_multiply_pipeline,
@@ -259,50 +249,6 @@ impl MetalContext {
             let threadgroup_size = MTLSize {
                 width: self
                     .matrix_multiply_rowwise_pipeline
-                    .thread_execution_width(),
-                height: 1,
-                depth: 1,
-            };
-            let col_threads = (col_len as u64 + 3) / 4;
-            let threadgroup_count = MTLSize {
-                width: ((row_len as u64 + threadgroup_size.width - 1) / threadgroup_size.width)
-                    as u64,
-                height: ((col_threads + threadgroup_size.width - 1) / threadgroup_size.width)
-                    as u64,
-                depth: 1,
-            };
-
-            encoder.dispatch_thread_groups(threadgroup_count, threadgroup_size);
-            encoder.end_encoding();
-
-            command_buffer.commit();
-            command_buffer.wait_until_completed();
-        })
-    }
-
-    /// Multiply each row of a matrix by the corresponding scalar in a vector, modifying the input matrix in place.
-    pub fn matrix_multiply_rowwise_in_place(&self, input: &GPUBuffer, row_factors: &GPUBuffer) {
-        assert_eq!(row_factors.rows * row_factors.cols, input.rows);
-
-        let row_len = input.rows as u32;
-        let col_len = input.cols as u32;
-
-        autoreleasepool(|| {
-            let row_len_buffer = create_buffer(&self.device, &[row_len]);
-            let col_len_buffer = create_buffer(&self.device, &[col_len]);
-
-            let command_buffer = self.command_queue.new_command_buffer();
-            let encoder = command_buffer.new_compute_command_encoder();
-
-            encoder.set_compute_pipeline_state(&self.matrix_multiply_rowwise_in_place_pipeline);
-            encoder.set_buffer(0, Some(&input.buffer), 0);
-            encoder.set_buffer(1, Some(&row_factors.buffer), 0);
-            encoder.set_buffer(2, Some(&row_len_buffer), 0);
-            encoder.set_buffer(3, Some(&col_len_buffer), 0);
-
-            let threadgroup_size = MTLSize {
-                width: self
-                    .matrix_multiply_rowwise_in_place_pipeline
                     .thread_execution_width(),
                 height: 1,
                 depth: 1,

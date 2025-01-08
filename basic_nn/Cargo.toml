@@ -11,3 +11,4 @@ half = "2.4.1"
 dataframe = { path = "../dataframe" }
 model = { path = "../model" }
 compute = { path = "../compute" }
+optimizer = { path = "../optimizer" }

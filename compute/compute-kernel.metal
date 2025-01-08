@@ -148,7 +148,7 @@ kernel void softmax_sum(const device half *a [[ buffer(0) ]],
     }
 }
 
-kernel void softmax_output(const device half *a [[ buffer(0) ]],
+kernel void softmax_output(device half *a [[ buffer(0) ]],
                     const device float *sum [[ buffer(1) ]],
                     const device uint *array_len [[ buffer(2) ]],
                     device half *output [[ buffer(3) ]],

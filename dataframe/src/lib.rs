@@ -96,7 +96,7 @@ impl DataFrame {
     ) {
         let sum = (train_weight + val_weight + test_weight) as f32;
         let train_percentage = (train_weight as f32) / (sum);
-        let val_percentage = (train_weight as f32) / (sum);
+        let val_percentage = (val_weight as f32) / (sum);
         let train_rows = ((self.rows as f32) * train_percentage) as usize;
         let val_rows = ((self.rows as f32) * val_percentage) as usize;
 
@@ -104,7 +104,7 @@ impl DataFrame {
         self.test_start = train_rows + val_rows;
     }
 
-    pub fn shuffle(&mut self, segment: DataSegment) -> Result<(), std::io::Error> {
+    pub fn shuffle(&mut self, segment: &DataSegment) -> Result<(), std::io::Error> {
         let mut fd1 = OpenOptions::new()
             .read(true)
             .write(true)
@@ -386,7 +386,7 @@ impl DataFrame {
         &self,
         batch_num: usize,
         batch_size: usize,
-        segment: DataSegment,
+        segment: &DataSegment,
     ) -> Vec<Vec<f16>> {
         let (start_row, end_row) = match segment {
             DataSegment::Train => (0, self.val_start),
@@ -413,7 +413,23 @@ impl DataFrame {
         batch
     }
 
-    pub fn get_data_segment_size(&self, segment: DataSegment) -> usize {
+    pub fn get_segment(&self, segment: &DataSegment) -> Vec<Vec<f16>> {
+        let (start_row, end_row) = match segment {
+            DataSegment::Train => (0, self.val_start),
+            DataSegment::Val => (self.val_start, self.test_start),
+            DataSegment::Test => (self.test_start, self.rows),
+        };
+
+        let mut segment_data = Vec::with_capacity(end_row - start_row);
+
+        for i in start_row..end_row {
+            segment_data.push(self.get_row(i));
+        }
+
+        segment_data
+    }
+
+    pub fn get_data_segment_size(&self, segment: &DataSegment) -> usize {
         match segment {
             DataSegment::Train => self.val_start,
             DataSegment::Val => self.test_start - self.val_start,

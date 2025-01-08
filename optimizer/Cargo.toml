@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 model = { path = "../model" }
 compute = { path = "../compute" }
+half = "2.4.1"

@@ -15,7 +15,7 @@ impl Model {
         &self.layers
     }
 
-    pub fn inference(&mut self, input: &GPUBuffer, output: &GPUBuffer) {
+    pub fn inference(&self, input: &GPUBuffer, output: &GPUBuffer) {
         let first = &self.layers[0];
         get_metal_context().copy(input, first.input());
         for i in 0..self.layers.len() - 1 {
@@ -199,7 +199,7 @@ impl Layer for FullyConnectedLayer {
         compute.matrix_multiply(gradient_wrt_output, &self.input, &self.gradient, true, true);
         if self.has_relu {
             // output should already be in positive indicator form from above
-            compute.matrix_multiply_rowwise_in_place(&self.gradient, output);
+            compute.matrix_multiply_rowwise(&self.gradient, output, &self.gradient);
         }
 
         &self.gradient_wrt_input
