@@ -25,13 +25,7 @@ impl Model {
         last.forward(output);
     }
 
-    pub fn train_step(
-        &mut self,
-        input: &GPUBuffer,
-        output: &GPUBuffer,
-        target: &GPUBuffer,
-        gradients: Vec<&GPUBuffer>,
-    ) -> f16 {
+    pub fn train_step(&self, input: &GPUBuffer, output: &GPUBuffer, target: &GPUBuffer) -> f16 {
         let first = &self.layers[0];
         get_metal_context().copy(input, first.input());
         for i in 0..self.layers.len() - 1 {
@@ -43,7 +37,7 @@ impl Model {
         let (loss, mut gradient) = self.loss_fn.loss(output, target);
         let mut curr_output = output;
         for i in (0..self.layers.len()).rev() {
-            gradient = self.layers[i].backward(gradient, curr_output, gradients[i]);
+            gradient = self.layers[i].backward(gradient, curr_output);
             curr_output = self.layers[i].input();
         }
 
@@ -101,14 +95,10 @@ pub trait Layer {
     fn input_size(&self) -> usize;
     fn output_size(&self) -> usize;
     fn input(&self) -> &GPUBuffer; // layers should own a copy of their last input
+    fn gradient(&self) -> &GPUBuffer; // layers should own a copy of their last gradient
     fn forward(&self, output: &GPUBuffer);
-    // computes gradient gradient wrt weights and returns gradient wrt input
-    fn backward(
-        &self,
-        gradient_wrt_output: &GPUBuffer,
-        output: &GPUBuffer,
-        gradient_wrt_weights: &GPUBuffer,
-    ) -> &GPUBuffer;
+    // stores gradient wrt weights and returns gradient wrt input
+    fn backward(&self, gradient_wrt_output: &GPUBuffer, output: &GPUBuffer) -> &GPUBuffer;
     fn weights(&self) -> &GPUBuffer;
 }
 
@@ -127,13 +117,14 @@ fn init_weights(num_inputs: usize, num_outputs: usize) -> GPUBuffer {
         num_inputs,
         &(0..num_inputs * num_outputs)
             .map(|_| f16::from_f32(rng.gen_range(-boundary..boundary)))
-            .collect(),
+            .collect::<Vec<f16>>(),
     )
 }
 
 pub struct FullyConnectedLayer {
     weights: GPUBuffer,
     input: GPUBuffer,
+    gradient: GPUBuffer,
     gradient_wrt_input: GPUBuffer,
     has_relu: bool,
 }
@@ -141,12 +132,14 @@ pub struct FullyConnectedLayer {
 impl FullyConnectedLayer {
     pub fn new(input_size: usize, output_size: usize, has_relu: bool) -> Self {
         let weights = init_weights(input_size, output_size);
+        let gradient = GPUBuffer::new(output_size, input_size);
         let input = GPUBuffer::new(input_size, 1);
         let gradient_wrt_input = GPUBuffer::new(1, input_size);
 
         Self {
             weights,
             input,
+            gradient,
             gradient_wrt_input,
             has_relu,
         }
@@ -164,6 +157,10 @@ impl Layer for FullyConnectedLayer {
         self.weights.rows
     }
 
+    fn gradient(&self) -> &GPUBuffer {
+        &self.gradient
+    }
+
     fn forward(&self, output: &GPUBuffer) {
         let compute = get_metal_context();
         compute.matrix_multiply(&self.weights, &self.input, output, false, false);
@@ -173,23 +170,18 @@ impl Layer for FullyConnectedLayer {
     }
 
     // computes gradient wrt input and gradient wrt weights
-    fn backward(
-        &self,
-        gradient_wrt_output: &GPUBuffer,
-        output: &GPUBuffer,
-        gradient_wrt_weights: &GPUBuffer,
-    ) -> &GPUBuffer {
+    fn backward(&self, gradient_wrt_output: &GPUBuffer, output: &GPUBuffer) -> &GPUBuffer {
         let compute = get_metal_context();
         // 1. gradient_wrt_output
         if self.has_relu {
             // hacky - it's okay to spoil outputs as the layer in front of us is done
             compute.positive_indicator(output);
             // use gradient wrt weights as a tmp buffer (it's the right size!)
-            compute.matrix_multiply_rowwise(&self.weights, output, gradient_wrt_weights);
+            compute.matrix_multiply_rowwise(&self.weights, output, &self.gradient);
             compute.matrix_multiply(
                 gradient_wrt_output,
-                gradient_wrt_weights,
-                output,
+                &self.gradient,
+                &self.gradient_wrt_input,
                 false,
                 false,
             );
@@ -204,16 +196,10 @@ impl Layer for FullyConnectedLayer {
         }
 
         // 2. gradient_wrt_weights
-        compute.matrix_multiply(
-            gradient_wrt_output,
-            &self.input,
-            gradient_wrt_weights,
-            true,
-            true,
-        );
+        compute.matrix_multiply(gradient_wrt_output, &self.input, &self.gradient, true, true);
         if self.has_relu {
             // output should already be in positive indicator form from above
-            compute.matrix_multiply_rowwise_in_place(gradient_wrt_weights, output);
+            compute.matrix_multiply_rowwise_in_place(&self.gradient, output);
         }
 
         &self.gradient_wrt_input

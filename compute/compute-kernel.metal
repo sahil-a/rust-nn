@@ -278,9 +278,11 @@ kernel void matrix_multiply(const device half *a [[ buffer(0) ]],
                             const device uint *row_len [[ buffer(3) ]],
                             const device uint *inner_len [[ buffer(4) ]],
                             const device uint *col_len [[ buffer(5) ]],
-                            const device bool *a_transposed [[ buffer(6) ]],
-                            const device bool *b_transposed [[ buffer(7) ]],
-                            const device uint *tile_size [[ buffer(8) ]],
+                            const device uint *a_stride [[ buffer(6) ]],
+                            const device uint *b_stride [[ buffer(7) ]],
+                            const device bool *a_transposed [[ buffer(8) ]],
+                            const device bool *b_transposed [[ buffer(9) ]],
+                            const device uint *tile_size [[ buffer(10) ]],
                             uint2 tid [[ threadgroup_position_in_grid ]],
                             uint2 lid [[ thread_position_in_threadgroup ]],
                             uint2 threads_per_threadgroup [[ threads_per_threadgroup ]],
@@ -298,9 +300,9 @@ kernel void matrix_multiply(const device half *a [[ buffer(0) ]],
             if (lid.y+inner_start < *inner_len) {
                 // load element of row x of A into shared mem
                 if (*a_transposed) {
-                    shared_mem_a[*tile_size * lid.x + lid.y] = a[(lid.y + inner_start) * *inner_len + x];
+                    shared_mem_a[*tile_size * lid.x + lid.y] = a[(lid.y + inner_start) * *a_stride + x];
                 } else {
-                    shared_mem_a[*tile_size * lid.x + lid.y] = a[x * *inner_len + lid.y + inner_start];
+                    shared_mem_a[*tile_size * lid.x + lid.y] = a[x * *a_stride + lid.y + inner_start];
                 }
             }
         }
@@ -308,9 +310,9 @@ kernel void matrix_multiply(const device half *a [[ buffer(0) ]],
             if (lid.x+inner_start < *inner_len) {
                 // load element of col y of B into shared mem
                 if (*b_transposed) {
-                    shared_mem_b[*tile_size * lid.y + lid.x] = b[y * *col_len + lid.x + inner_start];
+                    shared_mem_b[*tile_size * lid.y + lid.x] = b[y * *b_stride + lid.x + inner_start];
                 } else {
-                    shared_mem_b[*tile_size * lid.y + lid.x] = b[(lid.x+inner_start) * *col_len + y];
+                    shared_mem_b[*tile_size * lid.y + lid.x] = b[(lid.x+inner_start) * *b_stride + y];
                 }
             }
         }

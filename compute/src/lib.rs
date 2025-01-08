@@ -44,7 +44,7 @@ impl GPUBuffer {
         Self { rows, cols, buffer }
     }
 
-    pub fn from_vec(rows: usize, cols: usize, vec: &Vec<f16>) -> Self {
+    pub fn from_vec(rows: usize, cols: usize, vec: &[f16]) -> Self {
         Self {
             rows,
             cols,
@@ -598,10 +598,11 @@ impl MetalContext {
         a_transposed: bool,
         b_transposed: bool,
     ) {
-        let row_len = a.rows as u32;
-        let inner_len = a.cols as u32;
-        let col_len = b.cols as u32;
-        assert_eq!(b.rows as u32, inner_len);
+        let row_len = if a_transposed { a.cols } else { a.rows } as u32;
+        let inner_len = if a_transposed { a.rows } else { a.cols } as u32;
+        let col_len = if b_transposed { b.rows } else { b.cols } as u32;
+        let a_stride = a.cols as u32;
+        let b_stride = b.cols as u32;
         assert_eq!(output.rows as u32, row_len);
         assert_eq!(output.cols as u32, col_len);
 
@@ -610,6 +611,8 @@ impl MetalContext {
             let row_len_buffer = create_buffer(&self.device, &[row_len]);
             let inner_len_buffer = create_buffer(&self.device, &[inner_len]);
             let col_len_buffer = create_buffer(&self.device, &[col_len]);
+            let a_stride_buffer = create_buffer(&self.device, &[a_stride]);
+            let b_stride_buffer = create_buffer(&self.device, &[b_stride]);
             let tile_size_buffer = create_buffer(&self.device, &[tile_size]);
             let a_transposed_buffer = create_buffer(&self.device, &[a_transposed]);
             let b_transposed_buffer = create_buffer(&self.device, &[b_transposed]);
@@ -624,9 +627,11 @@ impl MetalContext {
             encoder.set_buffer(3, Some(&row_len_buffer), 0);
             encoder.set_buffer(4, Some(&inner_len_buffer), 0);
             encoder.set_buffer(5, Some(&col_len_buffer), 0);
-            encoder.set_buffer(6, Some(&a_transposed_buffer), 0);
-            encoder.set_buffer(7, Some(&b_transposed_buffer), 0);
-            encoder.set_buffer(8, Some(&tile_size_buffer), 0);
+            encoder.set_buffer(6, Some(&a_stride_buffer), 0);
+            encoder.set_buffer(7, Some(&b_stride_buffer), 0);
+            encoder.set_buffer(8, Some(&a_transposed_buffer), 0);
+            encoder.set_buffer(9, Some(&b_transposed_buffer), 0);
+            encoder.set_buffer(10, Some(&tile_size_buffer), 0);
 
             let threadgroup_count = MTLSize {
                 width: ((row_len + tile_size - 1) / tile_size) as u64,
@@ -674,24 +679,14 @@ mod tests {
         row_len: usize,
         inner_len: usize,
         col_len: usize,
-        a_transposed: bool,
-        b_transposed: bool,
     ) -> Vec<f16> {
         let mut result = vec![f16::from_f32(0.0); row_len * col_len];
         for i in 0..row_len {
             for j in 0..col_len {
                 let mut sum = f16::from_f32(0.0);
                 for k in 0..inner_len {
-                    let a_idx = if a_transposed {
-                        k * row_len + i
-                    } else {
-                        i * inner_len + k
-                    };
-                    let b_idx = if b_transposed {
-                        (j * inner_len + k) as usize
-                    } else {
-                        k * col_len + j
-                    };
+                    let a_idx = i * inner_len + k;
+                    let b_idx = k * col_len + j;
                     sum = sum + a[a_idx] * b[b_idx];
                 }
                 result[i * col_len + j] = sum;
@@ -747,8 +742,7 @@ mod tests {
         context.matrix_multiply(&gpu_a, &gpu_b, &gpu_out, false, false);
         let result = gpu_out.to_cpu_vec();
 
-        let cpu_result =
-            cpu_matrix_multiply(&mat_a, &mat_b, row_len, inner_len, col_len, false, false);
+        let cpu_result = cpu_matrix_multiply(&mat_a, &mat_b, row_len, inner_len, col_len);
 
         assert_eq!(result.len(), cpu_result.len());
         for (gpu_val, cpu_val) in result.iter().zip(cpu_result.iter()) {
@@ -763,9 +757,9 @@ mod tests {
     fn matrix_multiply_transposed() {
         initialize_metal_context();
         let context = get_metal_context();
-        let row_len = 5;
-        let inner_len = 5;
-        let col_len = 5;
+        let row_len = 25;
+        let inner_len = 26;
+        let col_len = 30;
 
         let mat_a = (0..(row_len * inner_len))
             .map(|i| f16::from_f32((i % 5) as f32))
@@ -774,21 +768,28 @@ mod tests {
             .map(|i| f16::from_f32((i % 5) as f32))
             .collect::<Vec<_>>();
 
-        let gpu_a = GPUBuffer::from_vec(row_len as usize, inner_len as usize, &mat_a);
-        let gpu_b = GPUBuffer::from_vec(inner_len as usize, col_len as usize, &mat_b);
+        let gpu_a = GPUBuffer::from_vec(inner_len as usize, row_len as usize, &mat_a);
+        let gpu_b = GPUBuffer::from_vec(col_len as usize, inner_len as usize, &mat_b);
         let gpu_out = GPUBuffer::new(row_len as usize, col_len as usize);
 
-        context.matrix_multiply(&gpu_a, &gpu_b, &gpu_out, false, true);
+        context.matrix_multiply(&gpu_a, &gpu_b, &gpu_out, true, true);
         let result = gpu_out.to_cpu_vec();
 
-        let cpu_a = (0..(row_len * inner_len))
-            .map(|i| f16::from_f32((i % 5) as f32))
-            .collect::<Vec<_>>();
-        let cpu_b = (0..(inner_len * col_len))
-            .map(|i| f16::from_f32((i % 5) as f32))
-            .collect::<Vec<_>>();
-        let cpu_result =
-            cpu_matrix_multiply(&cpu_a, &cpu_b, row_len, inner_len, col_len, false, true);
+        let mut mat_a_t = vec![f16::from_f32(0.0); row_len * inner_len];
+        let mut mat_b_t = vec![f16::from_f32(0.0); inner_len * col_len];
+
+        for i in 0..inner_len {
+            for j in 0..row_len {
+                mat_a_t[j * inner_len + i] = mat_a[i * row_len + j];
+            }
+        }
+        for i in 0..col_len {
+            for j in 0..inner_len {
+                mat_b_t[j * col_len + i] = mat_b[i * inner_len + j];
+            }
+        }
+
+        let cpu_result = cpu_matrix_multiply(&mat_a_t, &mat_b_t, row_len, inner_len, col_len);
 
         assert_eq!(result.len(), cpu_result.len());
         for (gpu_val, cpu_val) in result.iter().zip(cpu_result.iter()) {
@@ -1054,7 +1055,7 @@ mod tests {
         assert!(gpu_gflops > 100.0);
 
         let cpu_start = Instant::now();
-        let _ = cpu_matrix_multiply(&mat_a, &mat_b, row_len, inner_len, col_len, false, false);
+        let _ = cpu_matrix_multiply(&mat_a, &mat_b, row_len, inner_len, col_len);
         let cpu_total_time = cpu_start.elapsed();
         let cpu_avg_time_s = cpu_total_time.as_secs_f64();
         let cpu_gflops = (total_ops / cpu_avg_time_s) / 1e9;
