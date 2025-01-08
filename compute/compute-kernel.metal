@@ -80,22 +80,21 @@ kernel void dot_product(const device half *a [[ buffer(0) ]],
     }
 }
 
-kernel void relu(const device half *a [[ buffer(0) ]],
-                device half *output [[ buffer(1) ]],
-                const device uint *array_len [[ buffer(2) ]],
+kernel void relu(device half *a [[ buffer(0) ]],
+                const device uint *array_len [[ buffer(1) ]],
                 uint gid [[ thread_position_in_grid ]]) {
     uint base_idx = gid * 4;
     if (base_idx + 3 < *array_len) {
         // All 4 elements are within bounds - use vectorized operation
         half4 input = half4(a[base_idx], a[base_idx + 1], a[base_idx + 2], a[base_idx + 3]);
         half4 result = max(input, 0.0h);
-        output[base_idx] = result.x;
-        output[base_idx + 1] = result.y;
-        output[base_idx + 2] = result.z;
-        output[base_idx + 3] = result.w;
+        a[base_idx] = result.x;
+        a[base_idx + 1] = result.y;
+        a[base_idx + 2] = result.z;
+        a[base_idx + 3] = result.w;
     } else {
         for (uint i = 0; i < 4 && base_idx + i < *array_len; i++) {
-            output[base_idx + i] = max(a[base_idx + i], 0.0h);
+            a[base_idx + i] = max(a[base_idx + i], 0.0h);
         }
     }
 }
@@ -124,9 +123,8 @@ kernel void vector_pairwise_multiply(
 }
 
 kernel void positive_indicator(
-    const device half *a [[ buffer(0) ]],
-    device half *output [[ buffer(1) ]],
-    const device uint *array_len [[ buffer(2) ]],
+    device half *a [[ buffer(0) ]],
+    const device uint *array_len [[ buffer(1) ]],
     uint gid [[ thread_position_in_grid ]]
 ) {
     uint base_idx = gid * 4;
@@ -134,14 +132,14 @@ kernel void positive_indicator(
         // Vectorized operation with correct mask conversion
         half4 input = half4(a[base_idx], a[base_idx + 1], a[base_idx + 2], a[base_idx + 3]);
         half4 result = select(half4(0.0h), half4(1.0h), input > 0.0h);
-        output[base_idx] = result.x;
-        output[base_idx + 1] = result.y;
-        output[base_idx + 2] = result.z;
-        output[base_idx + 3] = result.w;
+        a[base_idx] = result.x;
+        a[base_idx + 1] = result.y;
+        a[base_idx + 2] = result.z;
+        a[base_idx + 3] = result.w;
     } else {
         // Scalar operation remains unchanged
         for (uint i = 0; i < 4 && base_idx + i < *array_len; i++) {
-            output[base_idx + i] = half(a[base_idx + i] > 0.0h) ? 1.0h : 0.0h;
+            a[base_idx + i] = half(a[base_idx + i] > 0.0h) ? 1.0h : 0.0h;
         }
     }
 }
@@ -244,32 +242,46 @@ kernel void matrix_addition(const device half *a [[ buffer(0) ]],
 
 kernel void matrix_multiply_rowwise(const device half *a [[ buffer(0) ]],
                             const device half *b [[ buffer(1) ]],
-                            const device bool *a_transposed [[ buffer(2) ]],
-                            device half *output [[buffer(3) ]],
-                            const device uint *row_len [[ buffer(4) ]],
-                            const device uint *col_len [[ buffer(5) ]],
+                            device half *output [[buffer(2) ]],
+                            const device uint *row_len [[ buffer(3) ]],
+                            const device uint *col_len [[ buffer(4) ]],
                             uint2 gid [[ thread_position_in_grid ]]) {
-    if (*a_transposed) {
-        if (gid.y < *row_len) {
-            uint base_y = gid.y * 4;
+   
+    if (gid.x < *row_len) {
+        uint base_y = gid.y * 4;
+        if (base_y + 3 < *col_len) {
+            half4 input = half4(a[gid.x * *col_len + base_y], a[gid.x * *col_len + base_y + 1], a[gid.x * *col_len + base_y + 2], a[gid.x * *col_len + base_y + 3]);
+            half4 result = b[gid.x] * input;
+            output[gid.x * *col_len + base_y] = result.x;
+            output[gid.x * *col_len + base_y + 1] = result.y;
+            output[gid.x * *col_len + base_y + 2] = result.z;
+            output[gid.x * *col_len + base_y + 3] = result.w;
+        } else {
             for (uint i = 0; i < 4 && base_y + i < *col_len; i++) {
-                output[gid.x * *col_len + base_y + i] = a[(base_y + i) * *row_len + gid.x] * b[gid.x];
+                output[gid.x * *col_len + base_y + i] = a[gid.x * *col_len + base_y + i] * b[gid.x];
             }
         }
-    } else {
-        if (gid.x < *row_len) {
-            uint base_y = gid.y * 4;
-            if (base_y + 3 < *col_len) {
-                half4 input = half4(a[gid.x * *col_len + base_y], a[gid.x * *col_len + base_y + 1], a[gid.x * *col_len + base_y + 2], a[gid.x * *col_len + base_y + 3]);
-                half4 result = b[gid.x] * input;
-                output[gid.x * *col_len + base_y] = result.x;
-                output[gid.x * *col_len + base_y + 1] = result.y;
-                output[gid.x * *col_len + base_y + 2] = result.z;
-                output[gid.x * *col_len + base_y + 3] = result.w;
-            } else {
-                for (uint i = 0; i < 4 && base_y + i < *col_len; i++) {
-                    output[gid.x * *col_len + base_y + i] = a[gid.x * *col_len + base_y + i] * b[gid.x];
-                }
+    }
+}
+
+kernel void matrix_multiply_rowwise_in_place(device half *a [[ buffer(0) ]],
+                            const device half *b [[ buffer(1) ]],
+                            const device uint *row_len [[ buffer(2) ]],
+                            const device uint *col_len [[ buffer(3) ]],
+                            uint2 gid [[ thread_position_in_grid ]]) {
+  
+    if (gid.x < *row_len) {
+        uint base_y = gid.y * 4;
+        if (base_y + 3 < *col_len) {
+            half4 input = half4(a[gid.x * *col_len + base_y], a[gid.x * *col_len + base_y + 1], a[gid.x * *col_len + base_y + 2], a[gid.x * *col_len + base_y + 3]);
+            half4 result = b[gid.x] * input;
+            a[gid.x * *col_len + base_y] = result.x;
+            a[gid.x * *col_len + base_y + 1] = result.y;
+            a[gid.x * *col_len + base_y + 2] = result.z;
+            a[gid.x * *col_len + base_y + 3] = result.w;
+        } else {
+            for (uint i = 0; i < 4 && base_y + i < *col_len; i++) {
+                a[gid.x * *col_len + base_y + i] = a[gid.x * *col_len + base_y + i] * b[gid.x];
             }
         }
     }

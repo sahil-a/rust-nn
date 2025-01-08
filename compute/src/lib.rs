@@ -30,25 +30,25 @@ pub fn get_metal_context() -> &'static MetalContext {
 }
 
 pub struct GPUBuffer {
-    rows: usize,
-    cols: usize,
+    pub rows: usize,
+    pub cols: usize,
     buffer: metal::Buffer,
 }
 
 impl GPUBuffer {
-    pub fn new(device: &Device, rows: usize, cols: usize) -> Self {
-        let buffer = device.new_buffer(
+    pub fn new(rows: usize, cols: usize) -> Self {
+        let buffer = get_metal_context().device.new_buffer(
             (rows * cols * std::mem::size_of::<f16>()) as u64,
             MTLResourceOptions::CPUCacheModeDefaultCache,
         );
         Self { rows, cols, buffer }
     }
 
-    pub fn from_vec(device: &Device, rows: usize, cols: usize, vec: &Vec<f16>) -> Self {
+    pub fn from_vec(rows: usize, cols: usize, vec: &Vec<f16>) -> Self {
         Self {
             rows,
             cols,
-            buffer: create_buffer(device, vec),
+            buffer: create_buffer(&get_metal_context().device, vec),
         }
     }
 
@@ -67,6 +67,7 @@ pub struct MetalContext {
     matrix_multiply_pipeline: ComputePipelineState,
     matrix_multiply_constant_pipeline: ComputePipelineState,
     matrix_multiply_rowwise_pipeline: ComputePipelineState,
+    matrix_multiply_rowwise_in_place_pipeline: ComputePipelineState,
     matrix_addition_pipeline: ComputePipelineState,
     relu_pipeline: ComputePipelineState,
     vector_multiply_pipeline: ComputePipelineState,
@@ -125,6 +126,14 @@ impl MetalContext {
                 )
                 .unwrap();
 
+            let matrix_multiply_rowwise_in_place_pipeline = device
+                .new_compute_pipeline_state_with_function(
+                    &library
+                        .get_function("matrix_multiply_rowwise_in_place", None)
+                        .unwrap(),
+                )
+                .unwrap();
+
             let matrix_addition_pipeline = device
                 .new_compute_pipeline_state_with_function(
                     &library.get_function("matrix_addition", None).unwrap(),
@@ -156,6 +165,7 @@ impl MetalContext {
                 matrix_multiply_pipeline,
                 matrix_multiply_constant_pipeline,
                 matrix_multiply_rowwise_pipeline,
+                matrix_multiply_rowwise_in_place_pipeline,
                 matrix_addition_pipeline,
                 relu_pipeline,
                 vector_multiply_pipeline,
@@ -229,7 +239,6 @@ impl MetalContext {
         input: &GPUBuffer,
         row_factors: &GPUBuffer,
         output: &GPUBuffer,
-        mat_transposed: bool,
     ) {
         assert_eq!(input.rows, output.rows);
         assert_eq!(input.cols, output.cols);
@@ -239,7 +248,6 @@ impl MetalContext {
         let col_len = input.cols as u32;
 
         autoreleasepool(|| {
-            let transposed_buffer = create_buffer(&self.device, &[mat_transposed]);
             let row_len_buffer = create_buffer(&self.device, &[row_len]);
             let col_len_buffer = create_buffer(&self.device, &[col_len]);
 
@@ -249,14 +257,57 @@ impl MetalContext {
             encoder.set_compute_pipeline_state(&self.matrix_multiply_rowwise_pipeline);
             encoder.set_buffer(0, Some(&input.buffer), 0);
             encoder.set_buffer(1, Some(&row_factors.buffer), 0);
-            encoder.set_buffer(2, Some(&transposed_buffer), 0);
-            encoder.set_buffer(3, Some(&output.buffer), 0);
-            encoder.set_buffer(4, Some(&row_len_buffer), 0);
-            encoder.set_buffer(5, Some(&col_len_buffer), 0);
+            encoder.set_buffer(2, Some(&output.buffer), 0);
+            encoder.set_buffer(3, Some(&row_len_buffer), 0);
+            encoder.set_buffer(4, Some(&col_len_buffer), 0);
 
             let threadgroup_size = MTLSize {
                 width: self
                     .matrix_multiply_rowwise_pipeline
+                    .thread_execution_width(),
+                height: 1,
+                depth: 1,
+            };
+            let col_threads = (col_len as u64 + 3) / 4;
+            let threadgroup_count = MTLSize {
+                width: ((row_len as u64 + threadgroup_size.width - 1) / threadgroup_size.width)
+                    as u64,
+                height: ((col_threads + threadgroup_size.width - 1) / threadgroup_size.width)
+                    as u64,
+                depth: 1,
+            };
+
+            encoder.dispatch_thread_groups(threadgroup_count, threadgroup_size);
+            encoder.end_encoding();
+
+            command_buffer.commit();
+            command_buffer.wait_until_completed();
+        })
+    }
+
+    /// Multiply each row of a matrix by the corresponding scalar in a vector, modifying the input matrix in place.
+    pub fn matrix_multiply_rowwise_in_place(&self, input: &GPUBuffer, row_factors: &GPUBuffer) {
+        assert_eq!(row_factors.rows * row_factors.cols, input.rows);
+
+        let row_len = input.rows as u32;
+        let col_len = input.cols as u32;
+
+        autoreleasepool(|| {
+            let row_len_buffer = create_buffer(&self.device, &[row_len]);
+            let col_len_buffer = create_buffer(&self.device, &[col_len]);
+
+            let command_buffer = self.command_queue.new_command_buffer();
+            let encoder = command_buffer.new_compute_command_encoder();
+
+            encoder.set_compute_pipeline_state(&self.matrix_multiply_rowwise_in_place_pipeline);
+            encoder.set_buffer(0, Some(&input.buffer), 0);
+            encoder.set_buffer(1, Some(&row_factors.buffer), 0);
+            encoder.set_buffer(2, Some(&row_len_buffer), 0);
+            encoder.set_buffer(3, Some(&col_len_buffer), 0);
+
+            let threadgroup_size = MTLSize {
+                width: self
+                    .matrix_multiply_rowwise_in_place_pipeline
                     .thread_execution_width(),
                 height: 1,
                 depth: 1,
@@ -475,10 +526,7 @@ impl MetalContext {
     }
 
     /// Returns a new vector with ReLU applied (max(0, x) for each element).
-    pub fn relu(&self, input: &GPUBuffer, output: &GPUBuffer) {
-        assert_eq!(input.rows, output.rows);
-        assert_eq!(input.cols, output.cols);
-
+    pub fn relu(&self, input: &GPUBuffer) {
         let array_len = (input.rows * input.cols) as u32;
 
         autoreleasepool(|| {
@@ -489,8 +537,7 @@ impl MetalContext {
 
             encoder.set_compute_pipeline_state(&self.relu_pipeline);
             encoder.set_buffer(0, Some(&input.buffer), 0);
-            encoder.set_buffer(1, Some(&output.buffer), 0);
-            encoder.set_buffer(2, Some(&array_len_buffer), 0);
+            encoder.set_buffer(1, Some(&array_len_buffer), 0);
 
             let num_threads = ((array_len + 3) / 4) as u64;
             let threadgroup_size = MTLSize {
@@ -513,10 +560,7 @@ impl MetalContext {
     }
 
     /// Returns a new vector with 1.0 for positive values and 0.0 for non-positive values.
-    pub fn positive_indicator(&self, input: &GPUBuffer, output: &GPUBuffer) {
-        assert_eq!(input.rows, output.rows);
-        assert_eq!(input.cols, output.cols);
-
+    pub fn positive_indicator(&self, input: &GPUBuffer) {
         let array_len = (input.rows * input.cols) as u32;
 
         autoreleasepool(|| {
@@ -527,8 +571,7 @@ impl MetalContext {
 
             encoder.set_compute_pipeline_state(&self.positive_indicator_pipeline);
             encoder.set_buffer(0, Some(&input.buffer), 0);
-            encoder.set_buffer(1, Some(&output.buffer), 0);
-            encoder.set_buffer(2, Some(&array_len_buffer), 0);
+            encoder.set_buffer(1, Some(&array_len_buffer), 0);
 
             let num_threads = ((array_len + 3) / 4) as u64;
             let threadgroup_size = MTLSize {
@@ -559,7 +602,6 @@ impl MetalContext {
         output: &GPUBuffer,
         a_transposed: bool,
         b_transposed: bool,
-        thread_count: u32,
     ) {
         let row_len = a.rows as u32;
         let inner_len = a.cols as u32;
@@ -569,7 +611,7 @@ impl MetalContext {
         assert_eq!(output.cols as u32, col_len);
 
         autoreleasepool(|| {
-            let tile_size = thread_count;
+            let tile_size = self.matrix_multiply_pipeline.thread_execution_width() as u32;
             let row_len_buffer = create_buffer(&self.device, &[row_len]);
             let inner_len_buffer = create_buffer(&self.device, &[inner_len]);
             let col_len_buffer = create_buffer(&self.device, &[col_len]);
@@ -673,28 +715,11 @@ mod tests {
         let mat_a = vec![f16::from_f32(2.0); (row_len * inner_len) as usize];
         let mat_b = vec![f16::from_f32(4.0); (inner_len * col_len) as usize];
 
-        let gpu_a = GPUBuffer::from_vec(
-            &context.device,
-            row_len as usize,
-            inner_len as usize,
-            &mat_a,
-        );
-        let gpu_b = GPUBuffer::from_vec(
-            &context.device,
-            inner_len as usize,
-            col_len as usize,
-            &mat_b,
-        );
-        let gpu_out = GPUBuffer::new(&context.device, row_len as usize, col_len as usize);
+        let gpu_a = GPUBuffer::from_vec(row_len as usize, inner_len as usize, &mat_a);
+        let gpu_b = GPUBuffer::from_vec(inner_len as usize, col_len as usize, &mat_b);
+        let gpu_out = GPUBuffer::new(row_len as usize, col_len as usize);
 
-        context.matrix_multiply(
-            &gpu_a,
-            &gpu_b,
-            &gpu_out,
-            false,
-            false,
-            context.matrix_multiply_pipeline.thread_execution_width() as u32,
-        );
+        context.matrix_multiply(&gpu_a, &gpu_b, &gpu_out, false, false);
         let result = gpu_out.to_cpu_vec();
 
         let cpu_result =
@@ -724,28 +749,11 @@ mod tests {
             .map(|i| f16::from_f32((i % 5) as f32))
             .collect::<Vec<_>>();
 
-        let gpu_a = GPUBuffer::from_vec(
-            &context.device,
-            row_len as usize,
-            inner_len as usize,
-            &mat_a,
-        );
-        let gpu_b = GPUBuffer::from_vec(
-            &context.device,
-            inner_len as usize,
-            col_len as usize,
-            &mat_b,
-        );
-        let gpu_out = GPUBuffer::new(&context.device, row_len as usize, col_len as usize);
+        let gpu_a = GPUBuffer::from_vec(row_len as usize, inner_len as usize, &mat_a);
+        let gpu_b = GPUBuffer::from_vec(inner_len as usize, col_len as usize, &mat_b);
+        let gpu_out = GPUBuffer::new(row_len as usize, col_len as usize);
 
-        context.matrix_multiply(
-            &gpu_a,
-            &gpu_b,
-            &gpu_out,
-            false,
-            true,
-            context.matrix_multiply_pipeline.thread_execution_width() as u32,
-        );
+        context.matrix_multiply(&gpu_a, &gpu_b, &gpu_out, false, true);
         let result = gpu_out.to_cpu_vec();
 
         let cpu_a = (0..(row_len * inner_len))
@@ -781,9 +789,9 @@ mod tests {
             .map(f16::from_f32)
             .collect();
 
-        let gpu_a = GPUBuffer::from_vec(&context.device, row_len, col_len, &a);
-        let gpu_b = GPUBuffer::from_vec(&context.device, row_len, col_len, &b);
-        let gpu_out = GPUBuffer::new(&context.device, row_len, col_len);
+        let gpu_a = GPUBuffer::from_vec(row_len, col_len, &a);
+        let gpu_b = GPUBuffer::from_vec(row_len, col_len, &b);
+        let gpu_out = GPUBuffer::new(row_len, col_len);
 
         let c_a = f16::from_f32(2.0);
         let c_b = f16::from_f32(3.0);
@@ -827,12 +835,11 @@ mod tests {
         let row_multipliers: Vec<f16> =
             vec![2.0, 3.0, 4.0].into_iter().map(f16::from_f32).collect();
 
-        let gpu_input = GPUBuffer::from_vec(&context.device, row_len, col_len, &input);
-        let gpu_out = GPUBuffer::new(&context.device, row_len, col_len);
-        let gpu_row_factors =
-            GPUBuffer::from_vec(&context.device, row_multipliers.len(), 1, &row_multipliers);
+        let gpu_input = GPUBuffer::from_vec(row_len, col_len, &input);
+        let gpu_out = GPUBuffer::new(row_len, col_len);
+        let gpu_row_factors = GPUBuffer::from_vec(row_multipliers.len(), 1, &row_multipliers);
 
-        context.matrix_multiply_rowwise(&gpu_input, &gpu_row_factors, &gpu_out, false);
+        context.matrix_multiply_rowwise(&gpu_input, &gpu_row_factors, &gpu_out);
         let result = gpu_out.to_cpu_vec();
 
         let expected: Vec<f16> = vec![
@@ -844,23 +851,6 @@ mod tests {
 
         assert_eq!(result.len(), expected.len());
         for (got, want) in result.iter().zip(expected.iter()) {
-            assert!((got.to_f32() - want.to_f32()).abs() < 1e-3);
-        }
-
-        let gpu_input_t = GPUBuffer::from_vec(&context.device, row_len, col_len, {
-            &vec![
-                1.0, 5.0, 9.0, 2.0, 6.0, 10.0, 3.0, 7.0, 11.0, 4.0, 8.0, 12.0,
-            ]
-            .into_iter()
-            .map(f16::from_f32)
-            .collect()
-        });
-        let gpu_out_t = GPUBuffer::new(&context.device, row_len, col_len);
-        context.matrix_multiply_rowwise(&gpu_input_t, &gpu_row_factors, &gpu_out_t, true);
-        let result_t = gpu_out_t.to_cpu_vec();
-
-        assert_eq!(result_t.len(), expected.len());
-        for (got, want) in result_t.iter().zip(expected.iter()) {
             assert!((got.to_f32() - want.to_f32()).abs() < 1e-3);
         }
     }
@@ -876,8 +866,8 @@ mod tests {
             .map(f16::from_f32)
             .collect();
 
-        let gpu_input = GPUBuffer::from_vec(&context.device, row_len, col_len, &input);
-        let gpu_out = GPUBuffer::new(&context.device, row_len, col_len);
+        let gpu_input = GPUBuffer::from_vec(row_len, col_len, &input);
+        let gpu_out = GPUBuffer::new(row_len, col_len);
         let constant = f16::from_f32(2.0);
 
         context.matrix_multiply_constant(&gpu_input, &gpu_out, constant);
@@ -909,8 +899,8 @@ mod tests {
             .map(f16::from_f32)
             .collect();
 
-        let gpu_in = GPUBuffer::from_vec(&context.device, 1, input.len(), &input);
-        let gpu_out = GPUBuffer::new(&context.device, 1, input.len());
+        let gpu_in = GPUBuffer::from_vec(1, input.len(), &input);
+        let gpu_out = GPUBuffer::new(1, input.len());
         context.softmax(&gpu_in, &gpu_out);
         let result = gpu_out.to_cpu_vec();
         let expected = cpu_softmax(&input);
@@ -932,10 +922,9 @@ mod tests {
             .map(f16::from_f32)
             .collect();
 
-        let gpu_in = GPUBuffer::from_vec(&context.device, 1, input.len(), &input);
-        let gpu_out = GPUBuffer::new(&context.device, 1, 5);
-        context.positive_indicator(&gpu_in, &gpu_out);
-        let result = gpu_out.to_cpu_vec();
+        let gpu_in = GPUBuffer::from_vec(1, input.len(), &input);
+        context.positive_indicator(&gpu_in);
+        let result = gpu_in.to_cpu_vec();
 
         let expected: Vec<f16> = vec![0.0, 0.0, 0.0, 1.0, 1.0]
             .into_iter()
@@ -961,9 +950,9 @@ mod tests {
             .map(f16::from_f32)
             .collect();
 
-        let gpu_a = GPUBuffer::from_vec(&context.device, 1, a.len(), &a);
-        let gpu_b = GPUBuffer::from_vec(&context.device, 1, b.len(), &b);
-        let gpu_out = GPUBuffer::new(&context.device, 1, 5);
+        let gpu_a = GPUBuffer::from_vec(1, a.len(), &a);
+        let gpu_b = GPUBuffer::from_vec(1, b.len(), &b);
+        let gpu_out = GPUBuffer::new(1, 5);
 
         context.vector_multiply(&gpu_a, &gpu_b, &gpu_out);
         let result = gpu_out.to_cpu_vec();
@@ -988,10 +977,9 @@ mod tests {
             .map(f16::from_f32)
             .collect();
 
-        let gpu_in = GPUBuffer::from_vec(&context.device, 1, 5, &input);
-        let gpu_out = GPUBuffer::new(&context.device, 1, 5);
-        context.relu(&gpu_in, &gpu_out);
-        let result = gpu_out.to_cpu_vec();
+        let gpu_in = GPUBuffer::from_vec(1, 5, &input);
+        context.relu(&gpu_in);
+        let result = gpu_in.to_cpu_vec();
 
         let expected: Vec<f16> = vec![0.0, 0.0, 0.0, 1.0, 2.0]
             .into_iter()
@@ -1015,32 +1003,18 @@ mod tests {
         let mat_b = vec![f16::from_f32(4.0); (inner_len * col_len) as usize];
         let total_ops = 2.0 * row_len as f64 * col_len as f64 * inner_len as f64;
 
-        let gpu_a = GPUBuffer::from_vec(&context.device, row_len, inner_len, &mat_a);
-        let gpu_b = GPUBuffer::from_vec(&context.device, inner_len, col_len, &mat_b);
-        let gpu_out = GPUBuffer::new(&context.device, row_len, col_len);
+        let gpu_a = GPUBuffer::from_vec(row_len, inner_len, &mat_a);
+        let gpu_b = GPUBuffer::from_vec(inner_len, col_len, &mat_b);
+        let gpu_out = GPUBuffer::new(row_len, col_len);
 
         for _ in 0..2 {
-            context.matrix_multiply(
-                &gpu_a,
-                &gpu_b,
-                &gpu_out,
-                false,
-                false,
-                context.matrix_multiply_pipeline.thread_execution_width() as u32,
-            );
+            context.matrix_multiply(&gpu_a, &gpu_b, &gpu_out, false, false);
         }
 
         let iterations = 5;
         let gpu_start = Instant::now();
         for _ in 0..iterations {
-            context.matrix_multiply(
-                &gpu_a,
-                &gpu_b,
-                &gpu_out,
-                false,
-                false,
-                context.matrix_multiply_pipeline.thread_execution_width() as u32,
-            );
+            context.matrix_multiply(&gpu_a, &gpu_b, &gpu_out, false, false);
         }
         let gpu_total_time = gpu_start.elapsed();
         let gpu_avg_time = gpu_total_time / iterations;

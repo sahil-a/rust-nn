@@ -9,3 +9,4 @@ edition = "2021"
 half = "2.4.1"
 metal = "0.30.0"
 compute = { path = "../compute" }
+rand = "0.8.5"
