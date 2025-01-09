@@ -70,3 +70,5 @@ I've included an example dataset and training loop in `basic_nn/src/main.rs`. Tr
 epoch 100: val accuracy 76.89, train accuracy 85.71
 test accuracy 74.79
 ```
+
+Try it yourself! - `git clone https://github.com/sahil-a/rust-nn.git && cd rust-nn && cargo run --release`.
