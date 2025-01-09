@@ -20,14 +20,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     df.write();
 
     const TARGET_LEN: usize = 2;
-    let learning_rate: f16 = f16::from_f32(0.01);
+    let learning_rate: f16 = f16::from_f32(0.05);
     let input_size = df.col_size - TARGET_LEN;
 
     let model = ModelBuilder::input_size(input_size)
-        .layer(Box::new(FullyConnectedLayer::new(input_size, 20, true)))?
-        .layer(Box::new(FullyConnectedLayer::new(20, 10, true)))?
-        .layer(Box::new(FullyConnectedLayer::new(10, 20, true)))?
-        .layer(Box::new(FullyConnectedLayer::new(20, TARGET_LEN, false)))?
+        .layer(Box::new(FullyConnectedLayer::new(input_size, 5, true)))?
+        .layer(Box::new(FullyConnectedLayer::new(5, 5, true)))?
+        .layer(Box::new(FullyConnectedLayer::new(5, TARGET_LEN, false)))?
         .loss_fn(Box::new(CrossEntropyLoss::new(TARGET_LEN)))?;
     let mut optimizer = FixedLearningRateOptimizer::new(&model, learning_rate);
 
@@ -36,7 +35,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let output_buffer = GPUBuffer::new(TARGET_LEN, 1);
     df.train_val_test_split(60, 20, 20);
 
-    for epoch in 1..=20 {
+    let val_accuracy = calculate_accuracy(&df, DataSegment::Val, &model, &output_buffer);
+    let train_accuracy = calculate_accuracy(&df, DataSegment::Train, &model, &output_buffer);
+    println!(
+        "epoch 0: val accuracy {:.2}, train accuracy {:.2}",
+        val_accuracy, train_accuracy
+    );
+
+    for epoch in 1..=100 {
         df.shuffle(&DataSegment::Train)?;
         for batch_num in 0..num_batches {
             let batch = df.get_batch(batch_num, batch_size, &DataSegment::Train);
@@ -50,8 +56,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             optimizer.update_gradients();
         }
 
+        let train_accuracy = calculate_accuracy(&df, DataSegment::Train, &model, &output_buffer);
         let val_accuracy = calculate_accuracy(&df, DataSegment::Val, &model, &output_buffer);
-        println!("epoch {}: val accuracy {:.2}", epoch, val_accuracy);
+        println!(
+            "epoch {}: val accuracy {:.2}, train accuracy {:.2}",
+            epoch, val_accuracy, train_accuracy
+        );
     }
 
     let test_accuracy = calculate_accuracy(&df, DataSegment::Test, &model, &output_buffer);
@@ -79,14 +89,14 @@ fn calculate_accuracy(
             correct += 1;
         }
     }
-    (correct as f32) / (df.get_data_segment_size(&segment) as f32)
+    (correct as f32) * 100.0 / (df.get_data_segment_size(&segment) as f32)
 }
 
 fn is_correct(softmax_output: &[f16], target: &[f16]) -> bool {
     let mut softmax_max_index = 0;
-    let mut softmax_max = f16::ZERO;
+    let mut softmax_max = softmax_output[0];
     let mut target_max_index = 0;
-    let mut target_max = f16::ZERO;
+    let mut target_max = target[0];
     for i in 1..softmax_output.len() {
         if softmax_output[i] > softmax_max {
             softmax_max = softmax_output[i];

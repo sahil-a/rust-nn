@@ -110,7 +110,7 @@ pub trait LossFn {
 fn init_weights(num_inputs: usize, num_outputs: usize) -> GPUBuffer {
     let mut rng = rand::thread_rng();
 
-    let boundary = f32::sqrt(6 as f32 / (num_inputs as f32));
+    let boundary = f32::sqrt(2.0/ (num_inputs as f32));
 
     GPUBuffer::from_vec(
         num_outputs,
