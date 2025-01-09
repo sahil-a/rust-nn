@@ -25,8 +25,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let model = ModelBuilder::input_size(input_size)
         .layer(Box::new(FullyConnectedLayer::new(input_size, 5, true)))?
-        .layer(Box::new(FullyConnectedLayer::new(5, 5, true)))?
-        .layer(Box::new(FullyConnectedLayer::new(5, TARGET_LEN, false)))?
+        .layer(Box::new(FullyConnectedLayer::new(5, 20, true)))?
+        .layer(Box::new(FullyConnectedLayer::new(20, TARGET_LEN, false)))?
         .loss_fn(Box::new(CrossEntropyLoss::new(TARGET_LEN)))?;
     let mut optimizer = FixedLearningRateOptimizer::new(&model, learning_rate);
 
