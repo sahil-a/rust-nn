@@ -1,6 +1,10 @@
 # Rust ML Experimentation
 
 I made a basic feedforward neural network ~~from scratch~~ with minimal dependencies. Also see https://github.com/sahil-a/metal-rs-matmul, which inspired this.
+```bash
+ag "dependencies" -G Cargo.toml -A 10
+```
+gives us:
 
 ```toml
 basic_nn/Cargo.toml
