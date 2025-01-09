@@ -4,10 +4,28 @@ use half::f16;
 use rand::Rng;
 
 // backprop calculations are from https://princeton-introml.github.io/files/ch11.pdf
+pub mod layers;
+pub mod loss_functions;
 
 pub struct Model {
     loss_fn: Box<dyn LossFn>,
     layers: Vec<Box<dyn Layer>>,
+}
+
+pub trait Layer {
+    fn input_size(&self) -> usize;
+    fn output_size(&self) -> usize;
+    fn input(&self) -> &GPUBuffer; // layers should own a copy of their last input
+    fn gradient(&self) -> &GPUBuffer; // layers should own a copy of their last gradient
+    fn forward(&self, output: &GPUBuffer);
+    // stores gradient wrt weights and returns gradient wrt input
+    fn backward(&self, gradient_wrt_output: &GPUBuffer, output: &GPUBuffer) -> &GPUBuffer;
+    fn weights(&self) -> &GPUBuffer;
+}
+
+pub trait LossFn {
+    // computes gradient wrt input and loss
+    fn loss(&self, input: &GPUBuffer, target: &GPUBuffer) -> (f16, &GPUBuffer);
 }
 
 impl Model {
@@ -88,158 +106,5 @@ impl ModelBuilder {
             loss_fn,
             layers: self.layers,
         })
-    }
-}
-
-pub trait Layer {
-    fn input_size(&self) -> usize;
-    fn output_size(&self) -> usize;
-    fn input(&self) -> &GPUBuffer; // layers should own a copy of their last input
-    fn gradient(&self) -> &GPUBuffer; // layers should own a copy of their last gradient
-    fn forward(&self, output: &GPUBuffer);
-    // stores gradient wrt weights and returns gradient wrt input
-    fn backward(&self, gradient_wrt_output: &GPUBuffer, output: &GPUBuffer) -> &GPUBuffer;
-    fn weights(&self) -> &GPUBuffer;
-}
-
-pub trait LossFn {
-    // computes gradient wrt input and loss
-    fn loss(&self, input: &GPUBuffer, target: &GPUBuffer) -> (f16, &GPUBuffer);
-}
-
-fn init_weights(num_inputs: usize, num_outputs: usize) -> GPUBuffer {
-    let mut rng = rand::thread_rng();
-
-    let boundary = f32::sqrt(2.0/ (num_inputs as f32));
-
-    GPUBuffer::from_vec(
-        num_outputs,
-        num_inputs,
-        &(0..num_inputs * num_outputs)
-            .map(|_| f16::from_f32(rng.gen_range(-boundary..boundary)))
-            .collect::<Vec<f16>>(),
-    )
-}
-
-pub struct FullyConnectedLayer {
-    weights: GPUBuffer,
-    input: GPUBuffer,
-    gradient: GPUBuffer,
-    gradient_wrt_input: GPUBuffer,
-    has_relu: bool,
-}
-
-impl FullyConnectedLayer {
-    pub fn new(input_size: usize, output_size: usize, has_relu: bool) -> Self {
-        let weights = init_weights(input_size, output_size);
-        let gradient = GPUBuffer::new(output_size, input_size);
-        let input = GPUBuffer::new(input_size, 1);
-        let gradient_wrt_input = GPUBuffer::new(1, input_size);
-
-        Self {
-            weights,
-            input,
-            gradient,
-            gradient_wrt_input,
-            has_relu,
-        }
-    }
-}
-
-impl Layer for FullyConnectedLayer {
-    fn input_size(&self) -> usize {
-        self.weights.cols
-    }
-    fn input(&self) -> &GPUBuffer {
-        &self.input
-    }
-    fn output_size(&self) -> usize {
-        self.weights.rows
-    }
-
-    fn gradient(&self) -> &GPUBuffer {
-        &self.gradient
-    }
-
-    fn forward(&self, output: &GPUBuffer) {
-        let compute = get_metal_context();
-        compute.matrix_multiply(&self.weights, &self.input, output, false, false);
-        if self.has_relu {
-            compute.relu(output);
-        }
-    }
-
-    // computes gradient wrt input and gradient wrt weights
-    fn backward(&self, gradient_wrt_output: &GPUBuffer, output: &GPUBuffer) -> &GPUBuffer {
-        let compute = get_metal_context();
-        // 1. gradient_wrt_output
-        if self.has_relu {
-            // hacky - it's okay to spoil outputs as the layer in front of us is done
-            compute.positive_indicator(output);
-            // use gradient wrt weights as a tmp buffer (it's the right size!)
-            compute.matrix_multiply_rowwise(&self.weights, output, &self.gradient);
-            compute.matrix_multiply(
-                gradient_wrt_output,
-                &self.gradient,
-                &self.gradient_wrt_input,
-                false,
-                false,
-            );
-        } else {
-            compute.matrix_multiply(
-                gradient_wrt_output,
-                &self.weights,
-                &self.gradient_wrt_input,
-                false,
-                false,
-            )
-        }
-
-        // 2. gradient_wrt_weights
-        compute.matrix_multiply(gradient_wrt_output, &self.input, &self.gradient, true, true);
-        if self.has_relu {
-            // output should already be in positive indicator form from above
-            compute.matrix_multiply_rowwise(&self.gradient, output, &self.gradient);
-        }
-
-        &self.gradient_wrt_input
-    }
-    fn weights(&self) -> &GPUBuffer {
-        &self.weights
-    }
-}
-
-pub struct CrossEntropyLoss {
-    gradient: GPUBuffer,
-    softmax: GPUBuffer,
-}
-
-impl CrossEntropyLoss {
-    pub fn new(num_classes: usize) -> Self {
-        Self {
-            gradient: GPUBuffer::new(1, num_classes),
-            softmax: GPUBuffer::new(num_classes, 1),
-        }
-    }
-}
-
-impl LossFn for CrossEntropyLoss {
-    fn loss(&self, input: &GPUBuffer, target: &GPUBuffer) -> (f16, &GPUBuffer) {
-        let compute = get_metal_context();
-        compute.softmax(input, &self.softmax);
-
-        // gradient = (softmax(input) - target)^T
-        compute.matrix_addition(
-            &self.softmax,
-            target,
-            &self.gradient,
-            f16::ONE,
-            f16::from_f32(-1.0),
-        );
-
-        // loss = -log(softmax(input) * target)
-        let loss = f16::from_f32(-f32::ln(compute.dot_product(&self.softmax, target)));
-
-        (loss, &self.gradient)
     }
 }

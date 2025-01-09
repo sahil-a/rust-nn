@@ -1,6 +1,8 @@
 use compute::*;
 use dataframe::*;
 use half::f16;
+use model::layers::*;
+use model::loss_functions::*;
 use model::*;
 use optimizer::*;
 use std::error::Error;
